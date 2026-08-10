@@ -1,5 +1,10 @@
-const { moveCached } = require('../utilities');
-const { REPAIR_THRESHOLD } = require('../constants');
+const {
+    harvestEnergy,
+    findClosestSource,
+    findRepairTarget,
+    repairAt,
+    upgradeRoomController
+} = require('../utilities');
 
 function run(creep) {
     if (typeof creep.memory.repairing !== 'boolean') {
@@ -18,55 +23,32 @@ function run(creep) {
     }
 
     if (creep.memory.repairing) {
-        const repairTarget = creep.pos.findClosestByPath(FIND_STRUCTURES, {
-            filter: (s) => {
-                if (s.hitsMax <= 0) {
-                    return false;
-                }
-
-                if (
-                    s.structureType === STRUCTURE_WALL ||
-                    s.structureType === STRUCTURE_RAMPART
-                ) {
-                    return false;
-                }
-
-                return s.hits < s.hitsMax * REPAIR_THRESHOLD;
-            }
-        });
+        const repairTarget = findRepairTarget(creep);
 
         if (repairTarget) {
-            if (creep.repair(repairTarget) === ERR_NOT_IN_RANGE) {
-                moveCached(creep, repairTarget, {
-                    visualizePathStyle: { stroke: '#ffffff' }
-                });
-            }
+            repairAt(creep, repairTarget, {
+                visualizePathStyle: { stroke: '#ffffff' }
+            });
 
             return;
         }
 
-        if (creep.room.controller && creep.room.controller.my) {
-            if (creep.upgradeController(creep.room.controller) === ERR_NOT_IN_RANGE) {
-                moveCached(creep, creep.room.controller, {
-                    visualizePathStyle: { stroke: '#ffffff' }
-                });
-            }
-        }
+        upgradeRoomController(creep, {
+            visualizePathStyle: { stroke: '#ffffff' }
+        });
 
         return;
     }
 
-    const source = creep.pos.findClosestByPath(FIND_SOURCES);
+    const source = findClosestSource(creep);
 
     if (!source) {
         return;
     }
 
-    if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        moveCached(creep, source, {
-            visualizePathStyle: { stroke: '#ffaa00' }
-        });
-    }
+    harvestEnergy(creep, source, {
+        visualizePathStyle: { stroke: '#ffaa00' }
+    });
 }
 
 module.exports = { run };

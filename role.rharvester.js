@@ -1,4 +1,10 @@
-const { moveCached } = require('../utilities');
+const {
+    moveCached,
+    harvestEnergy,
+    findClosestSource,
+    transferEnergy,
+    findEnergyTransferTarget
+} = require('../utilities');
 const { HOME_PATH_TTL, REMOTE_PATH_TTL } = require('../constants');
 
 function run(creep) {
@@ -22,10 +28,10 @@ function run(creep) {
             return;
         }
 
-        const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
+        const source = findClosestSource(creep, true);
 
-        if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            moveCached(creep, source, { reusePath: REMOTE_PATH_TTL });
+        if (source) {
+            harvestEnergy(creep, source, { reusePath: REMOTE_PATH_TTL });
         }
 
         return;
@@ -40,25 +46,19 @@ function run(creep) {
         return;
     }
 
-    const transferTarget = creep.pos.findClosestByPath(FIND_STRUCTURES, {
-        filter: (s) => (
-            s.structureType === STRUCTURE_SPAWN ||
-            s.structureType === STRUCTURE_EXTENSION
-        ) && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0
-    });
+    const transferTarget = findEnergyTransferTarget(creep, [
+        STRUCTURE_SPAWN,
+        STRUCTURE_EXTENSION
+    ]);
 
     if (transferTarget) {
-        if (creep.transfer(transferTarget, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            moveCached(creep, transferTarget, { reusePath: HOME_PATH_TTL });
-        }
+        transferEnergy(creep, transferTarget, { reusePath: HOME_PATH_TTL });
 
         return;
     }
 
     if (home.storage && home.storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
-        if (creep.transfer(home.storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            moveCached(creep, home.storage, { reusePath: HOME_PATH_TTL });
-        }
+        transferEnergy(creep, home.storage, { reusePath: HOME_PATH_TTL });
 
         return;
     }

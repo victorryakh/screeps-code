@@ -1,4 +1,10 @@
-const { moveCached } = require('../utilities');
+const {
+    harvestEnergy,
+    findClosestSource,
+    findConstructionSite,
+    buildAt,
+    upgradeRoomController
+} = require('../utilities');
 
 function run(creep) {
     if (typeof creep.memory.building !== 'boolean') {
@@ -19,48 +25,38 @@ function run(creep) {
     }
 
     if (creep.memory.building) {
-        let site = creep.pos.findClosestByPath(FIND_MY_CONSTRUCTION_SITES, {
-            filter: (s) => s.structureType !== STRUCTURE_ROAD && s.progress < s.progressTotal
-        });
+        let site = findConstructionSite(creep, (s) =>
+            s.structureType !== STRUCTURE_ROAD && s.progress < s.progressTotal
+        );
 
         if (!site) {
-            site = creep.pos.findClosestByPath(FIND_MY_CONSTRUCTION_SITES, {
-                filter: (s) => s.progress < s.progressTotal
-            });
+            site = findConstructionSite(creep);
         }
 
         if (site) {
-            if (creep.build(site) === ERR_NOT_IN_RANGE) {
-                moveCached(creep, site, {
-                    visualizePathStyle: { stroke: '#ffffff' }
-                });
-            }
+            buildAt(creep, site, {
+                visualizePathStyle: { stroke: '#ffffff' }
+            });
 
             return;
         }
 
-        if (creep.room.controller && creep.room.controller.my) {
-            if (creep.upgradeController(creep.room.controller) === ERR_NOT_IN_RANGE) {
-                moveCached(creep, creep.room.controller, {
-                    visualizePathStyle: { stroke: '#ffffff' }
-                });
-            }
-        }
+        upgradeRoomController(creep, {
+            visualizePathStyle: { stroke: '#ffffff' }
+        });
 
         return;
     }
 
-    const source = creep.pos.findClosestByPath(FIND_SOURCES);
+    const source = findClosestSource(creep);
 
     if (!source) {
         return;
     }
 
-    if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        moveCached(creep, source, {
-            visualizePathStyle: { stroke: '#ffaa00' }
-        });
-    }
+    harvestEnergy(creep, source, {
+        visualizePathStyle: { stroke: '#ffaa00' }
+    });
 }
 
 module.exports = { run };

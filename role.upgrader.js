@@ -1,4 +1,9 @@
-const { moveCached } = require('../utilities');
+const {
+    moveCached,
+    harvestEnergy,
+    findClosestSource,
+    upgradeRoomController
+} = require('../utilities');
 
 function run(creep) {
     if (typeof creep.memory.upgrading !== 'boolean') {
@@ -26,26 +31,22 @@ function run(creep) {
     }
 
     if (creep.memory.upgrading) {
-        if (creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
-            moveCached(creep, controller, {
-                visualizePathStyle: { stroke: '#00ff00' }
-            });
-        }
+        upgradeRoomController(creep, {
+            visualizePathStyle: { stroke: '#00ff00' }
+        });
 
         return;
     }
 
-    const source = creep.pos.findClosestByPath(FIND_SOURCES);
+    const source = findClosestSource(creep);
 
     if (!source) {
         return;
     }
 
-    if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        moveCached(creep, source, {
-            visualizePathStyle: { stroke: '#ffaa00' }
-        });
-    }
+    harvestEnergy(creep, source, {
+        visualizePathStyle: { stroke: '#ffaa00' }
+    });
 }
 
 module.exports = { run };
