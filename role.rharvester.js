@@ -1,0 +1,69 @@
+const { moveCached } = require('../utilities');
+const { HOME_PATH_TTL, REMOTE_PATH_TTL } = require('../constants');
+
+function run(creep) {
+    if (!creep.memory.targetRoom) {
+        return;
+    }
+
+    const home = Game.rooms[creep.memory.homeRoom];
+
+    if (!home) {
+        return;
+    }
+
+    if (creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+        if (creep.room.name !== creep.memory.targetRoom) {
+            moveCached(
+                creep,
+                new RoomPosition(25, 25, creep.memory.targetRoom),
+                { reusePath: REMOTE_PATH_TTL }
+            );
+            return;
+        }
+
+        const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
+
+        if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
+            moveCached(creep, source, { reusePath: REMOTE_PATH_TTL });
+        }
+
+        return;
+    }
+
+    if (creep.room.name !== home.name) {
+        moveCached(
+            creep,
+            home.controller || new RoomPosition(25, 25, home.name),
+            { reusePath: REMOTE_PATH_TTL }
+        );
+        return;
+    }
+
+    const transferTarget = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+        filter: (s) => (
+            s.structureType === STRUCTURE_SPAWN ||
+            s.structureType === STRUCTURE_EXTENSION
+        ) && s.store.getFreeCapacity(RESOURCE_ENERGY) > 0
+    });
+
+    if (transferTarget) {
+        if (creep.transfer(transferTarget, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            moveCached(creep, transferTarget, { reusePath: HOME_PATH_TTL });
+        }
+
+        return;
+    }
+
+    if (home.storage && home.storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+        if (creep.transfer(home.storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            moveCached(creep, home.storage, { reusePath: HOME_PATH_TTL });
+        }
+
+        return;
+    }
+
+    creep.drop(RESOURCE_ENERGY);
+}
+
+module.exports = { run };
