@@ -30,6 +30,8 @@ bun run build        # bun build src/main.ts --outdir dist --target=node --forma
 bun run push-main    # build + grunt dist (uploads to screeps.com)
 ```
 
+`git commit` automatically runs `bun run lint` and `bun run typecheck` via Husky. Bypass with `git commit --no-verify` when needed.
+
 ## Entry point
 
 `src/main.ts` exports the `loop()` function

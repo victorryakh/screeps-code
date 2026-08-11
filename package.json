@@ -2,16 +2,18 @@
   "name": "screeps",
   "private": true,
   "scripts": {
+    "prepare": "husky",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "build": "bun build src/main.ts --outdir dist --target=node --format=cjs",
-    "push-main": "bun run build && grunt screeps"
+    "push-main": "bun run lint && bun run build && grunt screeps"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/bun": "latest",
     "eslint": "^10.8.1",
     "grunt-screeps": "^1.5.0",
+    "husky": "^9.1.7",
     "typescript": "^5",
     "typescript-eslint": "^8.67.0"
   },
