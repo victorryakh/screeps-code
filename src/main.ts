@@ -1,7 +1,11 @@
 import * as room from './room';
 import * as expansion from './expansion';
+import * as metrics from './metrics';
 
 export function loop(): void {
+    metrics.tickStart();
+    metrics.init();
+
     for (const name in Memory.creeps) {
         if (!Game.creeps[name]) {
             delete Memory.creeps[name];
@@ -35,6 +39,7 @@ export function loop(): void {
     }
 
     if (ownedRoomNames.length === 0) {
+        metrics.tickEnd();
         return;
     }
 
@@ -54,4 +59,6 @@ export function loop(): void {
     ) {
         Game.cpu.generatePixel();
     }
+
+    metrics.tickEnd();
 }

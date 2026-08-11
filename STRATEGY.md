@@ -105,6 +105,24 @@
 - `findConstructionSite` и `buildAt` — для строителей.
 - `findRepairTarget` и `repairAt` — для ремонтников (стены/рампарты исключены).
 
+### Логгирование (`src/log.ts`)
+
+Уровни: `error < warn < info < debug < trace`. Уровень по умолчанию — `info`, читается из `Memory.logLevel`. `error`/`warn`/`info` эмитятся всегда; `debug`/`trace` — только при `Memory.debug === true`. `warn` и `error` дополнительно отправляются в `Game.notify` с дедупликацией (`Memory._notified`, TTL 500 тиков), чтобы не спамить в почту при повторяющихся ошибках. Формат строки: `[<tick>] [<LEVEL>] [<scope>] <msg>` + JSON-дамп, если есть `data`.
+
+### Метрики (`src/metrics.ts`)
+
+Расчёт расстояний, длительностей и экономики крипов/комнат.
+
+- Глобально: `Memory.metrics` — `ticks`, `lastTickCpu`, `lastBucket`, `spawnsByRole`, `deathsByRole`, `totalSpawnEnergy`.
+- На комнату: `Memory.rooms[name].metrics.tripSamples` — кольцевой буфер (20 последних сэмплов) с `distance`/`roundTripTicks`/`energyPerTick`; `lastRoleCounts`, `lastRcl`.
+
+API:
+- `init()` / `tickStart()` / `tickEnd()` — вызываются из `main.ts` (`loop:6-7,42,63`). Стоимость CPU в дефолте — несколько записей в `Memory` и проход по owned-комнатам.
+- `tripEconomics(creep, from, to)` — основной расчёт. Использует кэш пути из `creep.memory._move` (см. `utilities.ts:23`), иначе `PathFinder.search`. Возвращает `{ distance, oneWayTicks, roundTripTicks, carryCapacity, energyPerTick, pathTtl }`. Запись сэмпла в `tripSamples` — только при `Memory.debug === true`.
+- `pathLengthCached(from, to)` — расстояние между двумя точками через `PathFinder.search` без аллокации массива. Полезно для планирования `rharvester` маршрутов.
+- `recordSpawn(role, cost, bodyParts)` / `recordCreepDeath(role, ageTicks)` — обновляют глобальные счётчики. Подключение из `spawn.ts` и мест гибели крипов — следующий шаг (намеренно не делается сейчас, чтобы сложность нарастала постепенно).
+- `summarize()` — дамп для ручного `console.log(JSON.stringify(metrics.summarize()))`.
+
 ## Расширение
 
 `src/expansion.ts` — одна из ключевых частей стратегии.
@@ -146,6 +164,7 @@
 - `_spawnCooldown` — один спawn-запрос за тик.
 - `_harvesterIndex` — индекс источника хранится в памяти комнаты, не пересчитывается.
 - `Game.cpu.generatePixel()` работает только при `bucket >= 10000`, иначе бот «копит» процессорное время.
+- `metrics` — при `Memory.debug === false` активны только `init`/`tickStart`/`tickEnd` и обновление счётчиков спавнов/смертей (когда будут подключены). При `Memory.debug === true` дополнительно пушатся `tripSamples` и `lastRcl` в per-room память. «Горячие» операции (`tripEconomics`) всегда используют кэш пути из `moveCached`, поэтому не запускают `PathFinder.search` зря.
 
 ## Намерения и ограничения
 
