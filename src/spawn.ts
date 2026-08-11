@@ -1,7 +1,7 @@
-const { ROLE, REMOTE_ROLES } = require('./constants');
-const { bodyFor, bodyCost } = require('./utilities');
+import { ROLE, REMOTE_ROLES } from './constants';
+import { bodyFor, bodyCost } from './utilities';
 
-function trySpawn(room, role) {
+export function trySpawn(room: Room, role: string): boolean {
     if (room.memory._spawnCooldown === Game.time) {
         return false;
     }
@@ -26,12 +26,12 @@ function trySpawn(room, role) {
 
     const name = `${role}_${Game.time}_${Math.floor(Math.random() * 1000)}`;
 
-    const memory = {
+    const memory: CreepMemory = {
         role: role,
         homeRoom: room.name
     };
 
-    if (REMOTE_ROLES.indexOf(role) !== -1) {
+    if (REMOTE_ROLES.indexOf(role as (typeof REMOTE_ROLES)[number]) !== -1) {
         if (!Memory.targetRoom) {
             return false;
         }
@@ -45,7 +45,9 @@ function trySpawn(room, role) {
         if (sources.length > 0) {
             room.memory._harvesterIndex = (room.memory._harvesterIndex || 0) + 1;
             const source = sources[room.memory._harvesterIndex % sources.length];
-            memory.sourceId = source.id;
+            if (source) {
+                memory.sourceId = source.id;
+            }
         }
     }
 
@@ -59,7 +61,7 @@ function trySpawn(room, role) {
     return false;
 }
 
-function canAffordBody(room, role) {
+export function canAffordBody(room: Room, role: string): boolean {
     const body = bodyFor(role);
 
     if (!body) {
@@ -68,8 +70,3 @@ function canAffordBody(room, role) {
 
     return room.energyCapacityAvailable >= bodyCost(body);
 }
-
-module.exports = {
-    trySpawn,
-    canAffordBody
-};

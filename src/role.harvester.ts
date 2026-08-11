@@ -1,15 +1,15 @@
-const {
+import {
     moveCached,
     harvestEnergy,
     findClosestSource,
     transferEnergy,
     findEnergyTransferTarget,
     upgradeRoomController
-} = require('./utilities');
+} from './utilities';
 
-function run(creep) {
+export function run(creep: Creep): void {
     if (creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
-        let source = Game.getObjectById(creep.memory.sourceId);
+        let source = Game.getObjectById(creep.memory.sourceId ?? ('' as Id<Source>));
 
         if (!source) {
             source = findClosestSource(creep);
@@ -44,5 +44,3 @@ function run(creep) {
         visualizePathStyle: { stroke: '#ffffff' }
     });
 }
-
-module.exports = { run };

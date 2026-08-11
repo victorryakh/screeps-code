@@ -1,12 +1,12 @@
-const {
+import {
     harvestEnergy,
     findClosestSource,
     findRepairTarget,
     repairAt,
     upgradeRoomController
-} = require('./utilities');
+} from './utilities';
 
-function run(creep) {
+export function run(creep: Creep): void {
     if (typeof creep.memory.repairing !== 'boolean') {
         creep.memory.repairing = false;
     }
@@ -50,5 +50,3 @@ function run(creep) {
         visualizePathStyle: { stroke: '#ffaa00' }
     });
 }
-
-module.exports = { run };

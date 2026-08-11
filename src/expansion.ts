@@ -1,7 +1,7 @@
-const { ROLE, EXPANSION, EXITS_CACHE_TTL } = require('./constants');
-const { trySpawn, canAffordBody } = require('./spawn');
+import { ROLE, EXPANSION, EXITS_CACHE_TTL } from './constants';
+import { trySpawn, canAffordBody } from './spawn';
 
-function run() {
+export function run(): void {
     const blacklist = Memory.expansionBlacklist || EXPANSION.blacklist || [];
 
     if (Memory.targetRoom && blacklist.indexOf(Memory.targetRoom) !== -1) {
@@ -9,7 +9,10 @@ function run() {
     }
 
     if (!Memory.targetRoom) {
-        Memory.targetRoom = pickExpansionTarget();
+        const picked = pickExpansionTarget();
+        if (picked) {
+            Memory.targetRoom = picked;
+        }
 
         if (!Memory.targetRoom) {
             return;
@@ -44,6 +47,10 @@ function run() {
         for (const name in Game.creeps) {
             const creep = Game.creeps[name];
 
+            if (!creep) {
+                continue;
+            }
+
             if (
                 creep.memory.role === ROLE.RHARVESTER &&
                 creep.memory.targetRoom === Memory.targetRoom
@@ -64,6 +71,10 @@ function run() {
 
     for (const name in Game.creeps) {
         const creep = Game.creeps[name];
+
+        if (!creep) {
+            continue;
+        }
 
         if (creep.memory.targetRoom !== Memory.targetRoom) {
             continue;
@@ -94,17 +105,16 @@ function run() {
     }
 }
 
-function findHomeRoomName() {
-    let bestRoom = null;
+export function findHomeRoomName(): string | null {
+    let bestRoom: Room | null = null;
 
     for (const roomName in Game.rooms) {
         const room = Game.rooms[roomName];
-
-        if (!room.controller || !room.controller.my) {
+        if (!room || !room.controller || !room.controller.my) {
             continue;
         }
 
-        if (!bestRoom) {
+        if (!bestRoom || !bestRoom.controller) {
             bestRoom = room;
             continue;
         }
@@ -125,7 +135,7 @@ function findHomeRoomName() {
     return bestRoom ? bestRoom.name : null;
 }
 
-function pickExpansionTarget() {
+function pickExpansionTarget(): string | null {
     const homeName = findHomeRoomName();
 
     if (!homeName) {
@@ -150,11 +160,12 @@ function pickExpansionTarget() {
     }
 
     const exits = cached.exits;
-    const neighbourRooms = [];
+    const neighbourRooms: string[] = [];
 
     for (const dir in exits) {
-        if (exits[dir]) {
-            neighbourRooms.push(exits[dir]);
+        const neighbour = exits[dir as ExitKey];
+        if (neighbour) {
+            neighbourRooms.push(neighbour);
         }
     }
 
@@ -177,7 +188,7 @@ function pickExpansionTarget() {
         }
     }
 
-    const directions = Object.keys(exits).sort();
+    const directions = Object.keys(exits).sort() as ExitKey[];
 
     for (const dir of directions) {
         const neighbourName = exits[dir];
@@ -220,15 +231,6 @@ function pickExpansionTarget() {
     return null;
 }
 
-function isNormalRoomStatus(status) {
-    if (!status) {
-        return false;
-    }
-
-    return status.status === 'normal' || status.status === 3;
+function isNormalRoomStatus(status: RoomStatus): boolean {
+    return status.status === 'normal';
 }
-
-module.exports = {
-    run,
-    findHomeRoomName
-};

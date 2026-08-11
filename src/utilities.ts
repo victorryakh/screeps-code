@@ -1,9 +1,15 @@
-const { ROLE, EXPANSION, HOME_PATH_TTL, REPAIR_THRESHOLD } = require('./constants');
+import { ROLE, EXPANSION, HOME_PATH_TTL, REPAIR_THRESHOLD } from './constants';
 
-function moveCached(creep, dest, opts) {
-    opts = opts || {};
+type MoveDest = RoomPosition | { pos: RoomPosition };
 
-    const pos = dest.pos || dest;
+export function moveCached(
+    creep: Creep,
+    dest: MoveDest,
+    opts?: MoveToOpts
+): ScreepsReturnCode {
+    opts = opts ?? {};
+
+    const pos: RoomPosition | undefined = 'pos' in dest ? dest.pos : dest;
 
     if (!pos || pos.roomName === undefined) {
         return ERR_INVALID_ARGS;
@@ -22,7 +28,7 @@ function moveCached(creep, dest, opts) {
         moveMemory.dest.x === pos.x &&
         moveMemory.dest.y === pos.y &&
         moveMemory.dest.roomName === pos.roomName &&
-        Game.time - (moveMemory.time || 0) < (opts.reusePath || HOME_PATH_TTL)
+        Game.time - (moveMemory.time || 0) < (opts.reusePath ?? HOME_PATH_TTL)
     ) {
         const result = creep.moveByPath(moveMemory.path);
 
@@ -38,7 +44,7 @@ function moveCached(creep, dest, opts) {
     return creep.moveTo(dest, opts);
 }
 
-function bodyCost(body) {
+export function bodyCost(body: BodyPartConstant[]): number {
     let cost = 0;
 
     for (const part of body) {
@@ -48,7 +54,7 @@ function bodyCost(body) {
     return cost;
 }
 
-function bodyFor(role) {
+export function bodyFor(role: string): BodyPartConstant[] {
     switch (role) {
         case ROLE.HARVESTER:
             return [WORK, CARRY, MOVE];
@@ -76,7 +82,11 @@ function bodyFor(role) {
     }
 }
 
-function harvestEnergy(creep, source, opts) {
+export function harvestEnergy(
+    creep: Creep,
+    source: Source | Mineral | Deposit | null | undefined,
+    opts?: MoveToOpts
+): ScreepsReturnCode {
     if (!source) {
         return ERR_INVALID_TARGET;
     }
@@ -88,11 +98,15 @@ function harvestEnergy(creep, source, opts) {
     return OK;
 }
 
-function findClosestSource(creep, activeOnly) {
+export function findClosestSource(creep: Creep, activeOnly = false): Source | null {
     return creep.pos.findClosestByPath(activeOnly ? FIND_SOURCES_ACTIVE : FIND_SOURCES);
 }
 
-function transferEnergy(creep, target, opts) {
+export function transferEnergy(
+    creep: Creep,
+    target: AnyCreep | Structure | null | undefined,
+    opts?: MoveToOpts
+): ScreepsReturnCode {
     if (!target) {
         return ERR_INVALID_TARGET;
     }
@@ -104,17 +118,19 @@ function transferEnergy(creep, target, opts) {
     return OK;
 }
 
-function findEnergyTransferTarget(creep, types) {
-    types = types || [STRUCTURE_SPAWN, STRUCTURE_EXTENSION];
-
+export function findEnergyTransferTarget(
+    creep: Creep,
+    types: StructureConstant[] = [STRUCTURE_SPAWN, STRUCTURE_EXTENSION]
+): Structure | null {
     return creep.pos.findClosestByPath(FIND_STRUCTURES, {
-        filter: (s) =>
-            types.indexOf(s.structureType) !== -1 &&
-            s.store.getFreeCapacity(RESOURCE_ENERGY) > 0
+        filter: (s): s is AnyStoreStructure =>
+            (types as StructureConstant[]).indexOf(s.structureType) !== -1 &&
+            'store' in s &&
+            (s as AnyStoreStructure).store.getFreeCapacity(RESOURCE_ENERGY) > 0
     });
 }
 
-function upgradeRoomController(creep, opts) {
+export function upgradeRoomController(creep: Creep, opts?: MoveToOpts): ScreepsReturnCode {
     const controller = creep.room.controller;
 
     if (!controller || !controller.my) {
@@ -128,15 +144,20 @@ function upgradeRoomController(creep, opts) {
     return OK;
 }
 
-function findConstructionSite(creep, filter) {
-    filter = filter || ((s) => s.progress < s.progressTotal);
-
+export function findConstructionSite(
+    creep: Creep,
+    filter: (s: ConstructionSite) => boolean = (s) => s.progress < s.progressTotal
+): ConstructionSite | null {
     return creep.pos.findClosestByPath(FIND_MY_CONSTRUCTION_SITES, {
         filter: filter
     });
 }
 
-function buildAt(creep, site, opts) {
+export function buildAt(
+    creep: Creep,
+    site: ConstructionSite | null | undefined,
+    opts?: MoveToOpts
+): ScreepsReturnCode {
     if (!site) {
         return ERR_INVALID_TARGET;
     }
@@ -148,9 +169,7 @@ function buildAt(creep, site, opts) {
     return OK;
 }
 
-function findRepairTarget(creep, threshold) {
-    threshold = (threshold === undefined) ? REPAIR_THRESHOLD : threshold;
-
+export function findRepairTarget(creep: Creep, threshold: number = REPAIR_THRESHOLD): Structure | null {
     return creep.pos.findClosestByPath(FIND_STRUCTURES, {
         filter: (s) => {
             if (s.hitsMax <= 0) {
@@ -169,7 +188,11 @@ function findRepairTarget(creep, threshold) {
     });
 }
 
-function repairAt(creep, target, opts) {
+export function repairAt(
+    creep: Creep,
+    target: Structure | null | undefined,
+    opts?: MoveToOpts
+): ScreepsReturnCode {
     if (!target) {
         return ERR_INVALID_TARGET;
     }
@@ -180,18 +203,3 @@ function repairAt(creep, target, opts) {
 
     return OK;
 }
-
-module.exports = {
-    moveCached,
-    bodyCost,
-    bodyFor,
-    harvestEnergy,
-    findClosestSource,
-    transferEnergy,
-    findEnergyTransferTarget,
-    upgradeRoomController,
-    findConstructionSite,
-    buildAt,
-    findRepairTarget,
-    repairAt
-};

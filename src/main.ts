@@ -1,7 +1,7 @@
-const room = require('./room');
-const expansion = require('./expansion');
+import * as room from './room';
+import * as expansion from './expansion';
 
-module.exports.loop = function () {
+export function loop(): void {
     for (const name in Memory.creeps) {
         if (!Game.creeps[name]) {
             delete Memory.creeps[name];
@@ -11,15 +11,23 @@ module.exports.loop = function () {
     for (const name in Game.creeps) {
         const creep = Game.creeps[name];
 
+        if (!creep) {
+            continue;
+        }
+
         if (!creep.memory.homeRoom) {
             creep.memory.homeRoom = creep.room.name;
         }
     }
 
-    const ownedRoomNames = [];
+    const ownedRoomNames: string[] = [];
 
     for (const roomName in Game.rooms) {
         const r = Game.rooms[roomName];
+
+        if (!r) {
+            continue;
+        }
 
         if (r.controller && r.controller.my) {
             ownedRoomNames.push(roomName);
@@ -31,7 +39,10 @@ module.exports.loop = function () {
     }
 
     for (const roomName of ownedRoomNames) {
-        room.run(Game.rooms[roomName]);
+        const r = Game.rooms[roomName];
+        if (r) {
+            room.run(r);
+        }
     }
 
     expansion.run();
@@ -43,4 +54,4 @@ module.exports.loop = function () {
     ) {
         Game.cpu.generatePixel();
     }
-};
+}

@@ -1,13 +1,13 @@
-const {
+import {
     moveCached,
     harvestEnergy,
     findClosestSource,
     transferEnergy,
     findEnergyTransferTarget
-} = require('./utilities');
-const { HOME_PATH_TTL, REMOTE_PATH_TTL } = require('./constants');
+} from './utilities';
+import { HOME_PATH_TTL, REMOTE_PATH_TTL } from './constants';
 
-function run(creep) {
+export function run(creep: Creep): void {
     if (!creep.memory.targetRoom) {
         return;
     }
@@ -65,5 +65,3 @@ function run(creep) {
 
     creep.drop(RESOURCE_ENERGY);
 }
-
-module.exports = { run };

@@ -1,26 +1,36 @@
-const { ROLE, TARGETS, DOWNGRADE_BUFFER_TICKS, EXTENSION_PLAN_RADIUS, EXTENSION_CHECK_INTERVAL, WALL_TERRAIN } = require('./constants');
-const { trySpawn } = require('./spawn');
+import {
+    ROLE,
+    TARGETS,
+    DOWNGRADE_BUFFER_TICKS,
+    EXTENSION_PLAN_RADIUS,
+    EXTENSION_CHECK_INTERVAL,
+    WALL_TERRAIN
+} from './constants';
+import { trySpawn } from './spawn';
+import * as harvester from './role.harvester';
+import * as upgrader from './role.upgrader';
+import * as builder from './role.builder';
+import * as repairer from './role.repairer';
+import * as rharvester from './role.rharvester';
+import * as reserver from './role.reserver';
+import * as claimer from './role.claimer';
 
-const harvester = require('./role.harvester');
-const upgrader = require('./role.upgrader');
-const builder = require('./role.builder');
-const repairer = require('./role.repairer');
-const rharvester = require('./role.rharvester');
-const reserver = require('./role.reserver');
-const claimer = require('./role.claimer');
-
-function run(room) {
+export function run(room: Room): void {
     if (!room.controller || !room.controller.my) {
         return;
     }
 
     const rcl = room.controller.level;
 
-    const counts = {};
-    const homeCreeps = [];
+    const counts: Record<string, number> = {};
+    const homeCreeps: Creep[] = [];
 
     for (const name in Game.creeps) {
         const creep = Game.creeps[name];
+
+        if (!creep) {
+            continue;
+        }
 
         if (creep.memory.homeRoom !== room.name) {
             continue;
@@ -35,14 +45,14 @@ function run(room) {
 
     runTowers(room);
 
-    const targets = TARGETS[rcl] || TARGETS[5];
+    const targets = TARGETS[rcl] || TARGETS[5] || { upgrader: 0, harvester: 0, builder: 0, repairer: 0 };
 
     const canUpgrade = room.controller.ticksToDowngrade > DOWNGRADE_BUFFER_TICKS;
     const upgraderTarget = canUpgrade
         ? targets.upgrader
         : Math.min(counts[ROLE.UPGRADER] || 0, 1);
 
-    const spawnOrder = [
+    const spawnOrder: [string, number][] = [
         [ROLE.UPGRADER, upgraderTarget],
         [ROLE.HARVESTER, targets.harvester],
         [ROLE.BUILDER, targets.builder],
@@ -64,7 +74,7 @@ function run(room) {
     }
 }
 
-function runCreep(creep) {
+function runCreep(creep: Creep): void {
     if (creep.spawning) {
         return;
     }
@@ -96,7 +106,11 @@ function runCreep(creep) {
     }
 }
 
-function ensureExtensions(room) {
+function ensureExtensions(room: Room): void {
+    if (!room.controller) {
+        return;
+    }
+
     const rcl = room.controller.level;
 
     if (rcl < 2) {
@@ -112,7 +126,7 @@ function ensureExtensions(room) {
 
     room.memory._extensionCheckTick = Game.time;
 
-    const maxExtensions = CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION][rcl];
+    const maxExtensions = CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION][rcl] ?? 0;
 
     const existingExtensions = room.find(FIND_MY_STRUCTURES, {
         filter: (s) => s.structureType === STRUCTURE_EXTENSION
@@ -137,7 +151,7 @@ function ensureExtensions(room) {
     }
 
     const terrain = room.getTerrain();
-    const candidates = [];
+    const candidates: { x: number; y: number }[] = [];
 
     for (let radius = 1; radius <= EXTENSION_PLAN_RADIUS; radius++) {
         for (let dx = -radius; dx <= radius; dx++) {
@@ -177,8 +191,8 @@ function ensureExtensions(room) {
     }
 }
 
-function runTowers(room) {
-    if (room.controller.level < 3) {
+function runTowers(room: Room): void {
+    if (!room.controller || room.controller.level < 3) {
         return;
     }
 
@@ -218,8 +232,3 @@ function runTowers(room) {
         }
     }
 }
-
-module.exports = {
-    run,
-    runCreep
-};
