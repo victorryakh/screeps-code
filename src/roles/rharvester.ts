@@ -4,8 +4,8 @@ import {
     findClosestSource,
     transferEnergy,
     findEnergyTransferTarget
-} from './utilities';
-import { HOME_PATH_TTL, REMOTE_PATH_TTL } from './constants';
+} from '../utilities';
+import { HOME_PATH_TTL, REMOTE_PATH_TTL } from '../constants';
 
 export function run(creep: Creep): void {
     if (!creep.memory.targetRoom) {

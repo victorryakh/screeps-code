@@ -4,7 +4,7 @@ import {
     findRepairTarget,
     repairAt,
     upgradeRoomController
-} from './utilities';
+} from '../utilities';
 
 export function run(creep: Creep): void {
     if (typeof creep.memory.repairing !== 'boolean') {

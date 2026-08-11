@@ -4,7 +4,7 @@ import {
     findConstructionSite,
     buildAt,
     upgradeRoomController
-} from './utilities';
+} from '../utilities';
 
 export function run(creep: Creep): void {
     if (typeof creep.memory.building !== 'boolean') {

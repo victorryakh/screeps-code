@@ -5,7 +5,7 @@ import {
     transferEnergy,
     findEnergyTransferTarget,
     upgradeRoomController
-} from './utilities';
+} from '../utilities';
 
 export function run(creep: Creep): void {
     if (creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {

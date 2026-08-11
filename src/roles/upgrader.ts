@@ -2,7 +2,7 @@ import {
     harvestEnergy,
     findClosestSource,
     upgradeRoomController
-} from './utilities';
+} from '../utilities';
 
 export function run(creep: Creep): void {
     if (typeof creep.memory.upgrading !== 'boolean') {

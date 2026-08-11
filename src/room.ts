@@ -7,13 +7,13 @@ import {
     WALL_TERRAIN
 } from './constants';
 import { trySpawn } from './spawn';
-import * as harvester from './role.harvester';
-import * as upgrader from './role.upgrader';
-import * as builder from './role.builder';
-import * as repairer from './role.repairer';
-import * as rharvester from './role.rharvester';
-import * as reserver from './role.reserver';
-import * as claimer from './role.claimer';
+import * as harvester from './roles/harvester';
+import * as upgrader from './roles/upgrader';
+import * as builder from './roles/builder';
+import * as repairer from './roles/repairer';
+import * as rharvester from './roles/rharvester';
+import * as reserver from './roles/reserver';
+import * as claimer from './roles/claimer';
 
 export function run(room: Room): void {
     if (!room.controller || !room.controller.my) {
