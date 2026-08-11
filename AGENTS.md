@@ -6,6 +6,10 @@
 4. После изменения кода убедись, что верхнеуровневая стратегия верно описана в `./STRATEGY.md`
 5. Screeps - комплексная игра. Поэтому стоит предпочитать простые решения сложным, чтобы сложность всей системы росла постепенно
 
+## Environment
+
+Проект использует Bun. Если `bash: bun: command not found...` - используй `export PATH="$HOME/.bun/bin:$PATH"`
+
 ## Documentation
 
 - API: https://docs.screeps.com/api/

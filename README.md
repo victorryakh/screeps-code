@@ -25,6 +25,7 @@ Create `.screeps.json` (gitignored) in the project root:
 
 ```bash
 bun run typecheck    # tsc --noEmit
+bun run lint         # eslint src
 bun run build        # bun build src/main.ts --outdir dist --target=node --format=cjs
 bun run push-main    # build + grunt dist (uploads to screeps.com)
 ```

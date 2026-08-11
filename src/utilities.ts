@@ -3,6 +3,23 @@ import { EXPANSION } from './strategy';
 
 type MoveDest = RoomPosition | { pos: RoomPosition };
 
+/**
+ * Перемещает крипа к указанной точке, используя закэшированный в памяти крипа путь
+ * для экономии CPU. При повторных вызовах с тем же назначением и в пределах TTL
+ * применяется сохранённый маршрут через `Creep.moveByPath`; при его устаревании,
+ * отсутствии или ошибке повторно выполняется полный поиск пути через `Creep.moveTo`.
+ *
+ * Путь хранится в `creep.memory._move` в формате `{ path, dest: { x, y, roomName }, time }`
+ * и считается валидным, пока `Game.time - time < opts.reusePath ?? HOME_PATH_TTL`.
+ *
+ * @param creep  Крип, который должен переместиться.
+ * @param dest   Цель перемещения: `RoomPosition` или любой объект с полем `pos`
+ *               (например, `Source`, `Structure`, `Creep`, `ConstructionSite`).
+ * @param opts   Дополнительные опции `MoveToOpts`. Поле `reusePath` ограничивает
+ *               время жизни кэша; если не задано, используется `HOME_PATH_TTL`.
+ * @returns Результат перемещения: `OK`, `ERR_TIRED`, `ERR_INVALID_ARGS`
+ *          или код ошибки от `Creep.moveTo` / `Creep.moveByPath`.
+ */
 export function moveCached(
     creep: Creep,
     dest: MoveDest,
