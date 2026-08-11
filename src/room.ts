@@ -130,9 +130,38 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
     }
 
     const terrain = room.getTerrain();
+
+    const adjacentSet = new Set<string>();
+    adjacentSet.add(`${spawn.pos.x},${spawn.pos.y}`);
+
+    const extensionStructures = room.find(FIND_MY_STRUCTURES, {
+        filter: (s) => s.structureType === STRUCTURE_EXTENSION
+    });
+    for (const s of extensionStructures) {
+        adjacentSet.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    const extensionSitesArr = room.find(FIND_MY_CONSTRUCTION_SITES, {
+        filter: (s) => s.structureType === STRUCTURE_EXTENSION
+    });
+    for (const s of extensionSitesArr) {
+        adjacentSet.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    const adjacencyScore = (x: number, y: number): number => {
+        let score = 0;
+        if (x > 0 && adjacentSet.has(`${x - 1},${y}`)) score++;
+        if (x < 49 && adjacentSet.has(`${x + 1},${y}`)) score++;
+        if (y > 0 && adjacentSet.has(`${x},${y - 1}`)) score++;
+        if (y < 49 && adjacentSet.has(`${x},${y + 1}`)) score++;
+        return score;
+    };
+
     const candidates: { x: number; y: number }[] = [];
 
     for (let radius = 1; radius <= layout.planRadius; radius++) {
+        const ring: { x: number; y: number }[] = [];
+
         for (let dx = -radius; dx <= radius; dx++) {
             for (let dy = -radius; dy <= radius; dy++) {
                 if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) {
@@ -150,9 +179,19 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
                     continue;
                 }
 
-                candidates.push({ x, y });
+                ring.push({ x, y });
             }
         }
+
+        ring.sort((a, b) => {
+            const diff = adjacencyScore(b.x, b.y) - adjacencyScore(a.x, a.y);
+            if (diff !== 0) return diff;
+            const da = Math.abs(a.x - spawn.pos.x) + Math.abs(a.y - spawn.pos.y);
+            const db = Math.abs(b.x - spawn.pos.x) + Math.abs(b.y - spawn.pos.y);
+            return da - db;
+        });
+
+        candidates.push(...ring);
     }
 
     let created = 0;
@@ -166,6 +205,7 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
 
         if (result === OK) {
             created++;
+            adjacentSet.add(`${pos.x},${pos.y}`);
         }
     }
 }
