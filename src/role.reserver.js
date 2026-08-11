@@ -1,5 +1,5 @@
-const { moveCached } = require('../utilities');
-const { REMOTE_PATH_TTL } = require('../constants');
+const { moveCached } = require('./utilities');
+const { REMOTE_PATH_TTL } = require('./constants');
 
 function run(creep) {
     if (!creep.memory.targetRoom) {
@@ -21,19 +21,8 @@ function run(creep) {
         return;
     }
 
-    const result = creep.claimController(controller);
-
-    if (result === ERR_NOT_IN_RANGE) {
+    if (creep.reserveController(controller) === ERR_NOT_IN_RANGE) {
         moveCached(creep, controller, { reusePath: REMOTE_PATH_TTL });
-        return;
-    }
-
-    if (result === OK && controller.my) {
-        if (Memory.debug) {
-            console.log(`[claim] claimed ${controller.room.name}, suiciding claimer`);
-        }
-
-        creep.suicide();
     }
 }
 

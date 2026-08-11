@@ -5,7 +5,7 @@ const {
     transferEnergy,
     findEnergyTransferTarget,
     upgradeRoomController
-} = require('../utilities');
+} = require('./utilities');
 
 function run(creep) {
     if (creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {

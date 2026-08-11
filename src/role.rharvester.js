@@ -4,8 +4,8 @@ const {
     findClosestSource,
     transferEnergy,
     findEnergyTransferTarget
-} = require('../utilities');
-const { HOME_PATH_TTL, REMOTE_PATH_TTL } = require('../constants');
+} = require('./utilities');
+const { HOME_PATH_TTL, REMOTE_PATH_TTL } = require('./constants');
 
 function run(creep) {
     if (!creep.memory.targetRoom) {

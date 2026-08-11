@@ -4,7 +4,7 @@ const {
     findConstructionSite,
     buildAt,
     upgradeRoomController
-} = require('../utilities');
+} = require('./utilities');
 
 function run(creep) {
     if (typeof creep.memory.building !== 'boolean') {

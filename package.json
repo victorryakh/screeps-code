@@ -1,0 +1,14 @@
+{
+  "name": "screeps",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@types/screeps": "^3.4.0",
+    "grunt-screeps": "^1.5.0"
+  }
+}

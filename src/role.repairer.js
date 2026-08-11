@@ -4,7 +4,7 @@ const {
     findRepairTarget,
     repairAt,
     upgradeRoomController
-} = require('../utilities');
+} = require('./utilities');
 
 function run(creep) {
     if (typeof creep.memory.repairing !== 'boolean') {
