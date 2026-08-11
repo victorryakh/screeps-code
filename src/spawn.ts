@@ -1,4 +1,5 @@
-import { ROLE, REMOTE_ROLES } from './constants';
+import { ROLE } from './constants';
+import { REMOTE_ROLES } from './strategy';
 import { bodyFor, bodyCost } from './utilities';
 
 export function trySpawn(room: Room, role: string): boolean {

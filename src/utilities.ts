@@ -1,4 +1,5 @@
-import { ROLE, EXPANSION, HOME_PATH_TTL, REPAIR_THRESHOLD } from './constants';
+import { ROLE, HOME_PATH_TTL, REPAIR_THRESHOLD } from './constants';
+import { EXPANSION } from './strategy';
 
 type MoveDest = RoomPosition | { pos: RoomPosition };
 

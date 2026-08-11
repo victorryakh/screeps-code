@@ -1,11 +1,4 @@
-import {
-    ROLE,
-    TARGETS,
-    DOWNGRADE_BUFFER_TICKS,
-    EXTENSION_PLAN_RADIUS,
-    EXTENSION_CHECK_INTERVAL,
-    WALL_TERRAIN
-} from './constants';
+import { ROLE } from './constants';
 import { trySpawn } from './spawn';
 import * as harvester from './roles/harvester';
 import * as upgrader from './roles/upgrader';
@@ -14,13 +7,17 @@ import * as repairer from './roles/repairer';
 import * as rharvester from './roles/rharvester';
 import * as reserver from './roles/reserver';
 import * as claimer from './roles/claimer';
+import {
+    planSpawnOrder,
+    planBaseLayout,
+    planDefense
+} from './strategy';
+import type { BaseLayoutDecision } from './strategy';
 
 export function run(room: Room): void {
     if (!room.controller || !room.controller.my) {
         return;
     }
-
-    const rcl = room.controller.level;
 
     const counts: Record<string, number> = {};
     const homeCreeps: Creep[] = [];
@@ -41,23 +38,17 @@ export function run(room: Room): void {
         homeCreeps.push(creep);
     }
 
-    ensureExtensions(room);
+    const layout = planBaseLayout(room);
+    if (layout.enabled) {
+        ensureExtensions(room, layout);
+    }
 
-    runTowers(room);
+    const defense = planDefense(room);
+    if (defense.enabled) {
+        runTowers(room, defense);
+    }
 
-    const targets = TARGETS[rcl] || TARGETS[5] || { upgrader: 0, harvester: 0, builder: 0, repairer: 0 };
-
-    const canUpgrade = room.controller.ticksToDowngrade > DOWNGRADE_BUFFER_TICKS;
-    const upgraderTarget = canUpgrade
-        ? targets.upgrader
-        : Math.min(counts[ROLE.UPGRADER] || 0, 1);
-
-    const spawnOrder: [string, number][] = [
-        [ROLE.UPGRADER, upgraderTarget],
-        [ROLE.HARVESTER, targets.harvester],
-        [ROLE.BUILDER, targets.builder],
-        [ROLE.REPAIRER, targets.repairer]
-    ];
+    const spawnOrder = planSpawnOrder(room, counts);
 
     for (const pair of spawnOrder) {
         const role = pair[0];
@@ -106,27 +97,15 @@ function runCreep(creep: Creep): void {
     }
 }
 
-function ensureExtensions(room: Room): void {
-    if (!room.controller) {
-        return;
-    }
-
-    const rcl = room.controller.level;
-
-    if (rcl < 2) {
-        return;
-    }
-
+function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
     if (
         room.memory._extensionCheckTick &&
-        Game.time - room.memory._extensionCheckTick < EXTENSION_CHECK_INTERVAL
+        Game.time - room.memory._extensionCheckTick < layout.checkInterval
     ) {
         return;
     }
 
     room.memory._extensionCheckTick = Game.time;
-
-    const maxExtensions = CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION][rcl] ?? 0;
 
     const existingExtensions = room.find(FIND_MY_STRUCTURES, {
         filter: (s) => s.structureType === STRUCTURE_EXTENSION
@@ -136,7 +115,7 @@ function ensureExtensions(room: Room): void {
         filter: (s) => s.structureType === STRUCTURE_EXTENSION
     }).length;
 
-    const need = maxExtensions - existingExtensions - extensionSites;
+    const need = layout.maxExtensions - existingExtensions - extensionSites;
 
     if (need <= 0) {
         return;
@@ -153,7 +132,7 @@ function ensureExtensions(room: Room): void {
     const terrain = room.getTerrain();
     const candidates: { x: number; y: number }[] = [];
 
-    for (let radius = 1; radius <= EXTENSION_PLAN_RADIUS; radius++) {
+    for (let radius = 1; radius <= layout.planRadius; radius++) {
         for (let dx = -radius; dx <= radius; dx++) {
             for (let dy = -radius; dy <= radius; dy++) {
                 if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) {
@@ -167,7 +146,7 @@ function ensureExtensions(room: Room): void {
                     continue;
                 }
 
-                if (terrain.get(x, y) === WALL_TERRAIN) {
+                if (terrain.get(x, y) === layout.wallTerrain) {
                     continue;
                 }
 
@@ -191,8 +170,8 @@ function ensureExtensions(room: Room): void {
     }
 }
 
-function runTowers(room: Room): void {
-    if (!room.controller || room.controller.level < 3) {
+function runTowers(room: Room, defense: { attackHostiles: boolean; healInjured: boolean }): void {
+    if (!defense.attackHostiles && !defense.healInjured) {
         return;
     }
 
@@ -204,9 +183,9 @@ function runTowers(room: Room): void {
         return;
     }
 
-    const hostiles = room.find(FIND_HOSTILE_CREEPS);
+    const hostiles = defense.attackHostiles ? room.find(FIND_HOSTILE_CREEPS) : [];
 
-    const injuredCreeps = hostiles.length
+    const injuredCreeps = hostiles.length || !defense.healInjured
         ? []
         : room.find(FIND_MY_CREEPS, {
             filter: (c) => c.hits < c.hitsMax
