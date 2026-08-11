@@ -1,3 +1,11 @@
+/* ============================================================================
+ * Жизненный цикл комнаты за один тик.
+ *
+ * Управляет планировкой (extensions), обороной (towers) и спавном
+ * «домашних» крипов на основе решений, возвращаемых {@link strategy}.
+ * Также маршрутизирует выполнение ролей через {@link runCreep}.
+ * ==========================================================================*/
+
 import { ROLE } from './constants';
 import { trySpawn } from './spawn';
 import * as harvester from './roles/harvester';
@@ -14,6 +22,22 @@ import {
 } from './strategy';
 import type { BaseLayoutDecision } from './strategy';
 
+/**
+ * Выполняет один тик собственной (owned) комнаты: собирает её крипов,
+ * применяет решения планировки и обороны, выполняет один проход спавна
+ * (не более одного крипа за тик), затем вызывает роль каждого крипа.
+ *
+ * Алгоритм:
+ * 1. Собрать крипов с `memory.homeRoom === room.name` и посчитать их по ролям.
+ * 2. При `planBaseLayout.enabled` — {@link ensureExtensions}.
+ * 3. При `planDefense.enabled` — {@link runTowers}.
+ * 4. Пройти по `planSpawnOrder` и попытаться создать первого недостающего
+ *    крипа через {@link trySpawn} (один крип за тик, `break`).
+ * 5. Для каждого крипа вызвать {@link runCreep}.
+ *
+ * @param room Комната, которой мы владеем (`room.controller.my === true`).
+ *             Чужие/нейтральные комнаты молча игнорируются.
+ */
 export function run(room: Room): void {
     if (!room.controller || !room.controller.my) {
         return;
@@ -65,6 +89,11 @@ export function run(room: Room): void {
     }
 }
 
+/**
+ * Маршрутизирует крип на соответствующий модуль роли по `creep.memory.role`.
+ * Крипы в состоянии `spawning` пропускаются. Неизвестные роли тихо
+ * игнорируются (`default` ветка).
+ */
 function runCreep(creep: Creep): void {
     if (creep.spawning) {
         return;
@@ -97,6 +126,23 @@ function runCreep(creep: Creep): void {
     }
 }
 
+/**
+ * Планирует недостающие construction sites для `STRUCTURE_EXTENSION` вокруг
+ * спавна. Алгоритм:
+ * - Вызывается не чаще, чем раз в `layout.checkInterval` тиков
+ *   (через `room.memory._extensionCheckTick`).
+ * - Сканируются кольца от спавна с радиусом `1..layout.planRadius`,
+ *   берутся только граничные клетки `max(|dx|,|dy|) === radius`.
+ * - Пропускаются стены (`terrain.get === layout.wallTerrain`) и клетки
+ *   за пределами `[1,48]`.
+ * - Внутри кольца клетки сортируются по числу смежных существующих
+ *   extensions (по убыванию), затем по манхэттенскому расстоянию до
+ *   спавна — для плотной кластеризации.
+ * - Создаются construction sites, пока не набран нужный лимит.
+ *
+ * @param room   Комната, для которой планируются расширения.
+ * @param layout Решение планировки, возвращённое {@link planBaseLayout}.
+ */
 function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
     if (
         room.memory._extensionCheckTick &&
@@ -210,6 +256,16 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
     }
 }
 
+/**
+ * Управляет башнями комнаты по политике обороны:
+ * 1. Если `defense.attackHostiles` — каждая башня атакует ближайшего
+ *    враждебного крипа (`tower.pos.findClosestByRange`).
+ * 2. Иначе, если `defense.healInjured` и ранёные есть — лечит ближайшего
+ *    раненого своего крипа.
+ *
+ * @param room    Комната с башнями.
+ * @param defense Решение, возвращённое {@link planDefense}.
+ */
 function runTowers(room: Room, defense: { attackHostiles: boolean; healInjured: boolean }): void {
     if (!defense.attackHostiles && !defense.healInjured) {
         return;

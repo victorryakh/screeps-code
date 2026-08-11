@@ -26,11 +26,17 @@ import type { RoleKey } from './constants';
 
 /* ---------- Стадии развития базы ---------------------------------------- */
 
+/** Высокоуровневая стадия развития базы (используется стратегическим слоем). */
 export type BaseStage =
     | 'bootstrap'
     | 'expansion-capable'
     | 'remote-harvest';
 
+/**
+ * Возвращает стадию развития базы по RCL комнаты и GCL аккаунта.
+ * `bootstrap` — до RCL 3 или GCL 2; `expansion-capable` — начиная с RCL 3
+ * и GCL 2. Стадия `remote-harvest` зарезервирована для будущего использования.
+ */
 export function getBaseStage(room: Room, gclLevel: number | undefined): BaseStage {
     const rcl = room.controller?.level ?? 0;
 
@@ -43,6 +49,7 @@ export function getBaseStage(room: Room, gclLevel: number | undefined): BaseStag
 
 /* ---------- Целевой состав крипов по RCL --------------------------------- */
 
+/** Целевое количество каждой «домашней» роли крипов в зависимости от RCL. */
 export interface RoomTargets {
     upgrader: number;
     harvester: number;
@@ -50,6 +57,10 @@ export interface RoomTargets {
     repairer: number;
 }
 
+/**
+ * Таблица целевого состава крипов для RCL 1–5. Ключ — RCL, значение —
+ * {@link RoomTargets}. Используется {@link getRoomTargets}.
+ */
 export const TARGETS: Record<number, RoomTargets> = {
     1: { upgrader: 2, harvester: 2, builder: 1, repairer: 0 },
     2: { upgrader: 2, harvester: 2, builder: 2, repairer: 0 },
@@ -58,6 +69,11 @@ export const TARGETS: Record<number, RoomTargets> = {
     5: { upgrader: 4, harvester: 3, builder: 2, repairer: 1 }
 };
 
+/**
+ * Возвращает целевой состав крипов для указанного RCL. Для RCL > 5
+ * возвращается запись для RCL 5; для невалидного RCL — безопасный нулевой
+ * объект.
+ */
 export function getRoomTargets(rcl: number): RoomTargets {
     return TARGETS[rcl] || TARGETS[5] || { upgrader: 0, harvester: 0, builder: 0, repairer: 0 };
 }
@@ -94,12 +110,20 @@ export function planSpawnOrder(
 
 /* ---------- Политика обороны -------------------------------------------- */
 
+/** Решение по включению оборонительной логики для комнаты. */
 export interface DefenseDecision {
+    /** Включать ли оборонительный проход (башни). */
     enabled: boolean;
+    /** Атаковать ли враждебных крипов. */
     attackHostiles: boolean;
+    /** Лечить ли раненых своих крипов. */
     healInjured: boolean;
 }
 
+/**
+ * Чистая функция: возвращает политику обороны для комнаты. Активна с RCL 3
+ * (башни появляются с RCL 3). Не имеет побочных эффектов.
+ */
 export function planDefense(room: Room): DefenseDecision {
     const rcl = room.controller?.level ?? 0;
 
@@ -116,14 +140,25 @@ export function planDefense(room: Room): DefenseDecision {
 
 /* ---------- Планировка базы --------------------------------------------- */
 
+/** Решение по автоматической планировке базы (на данный момент — extensions). */
 export interface BaseLayoutDecision {
+    /** Включён ли планировщик (активно с RCL 2). */
     enabled: boolean;
+    /** Максимальное число extensions, доступное при текущем RCL. */
     maxExtensions: number;
+    /** Радиус поиска места под extension (от центра спавна). */
     planRadius: number;
+    /** Интервал между полными проходами планировщика (в тиках). */
     checkInterval: number;
+    /** Битовая маска «непроходимой» клетки для фильтрации мест. */
     wallTerrain: TERRAIN_MASK_WALL;
 }
 
+/**
+ * Чистая функция: возвращает параметры планировки базы. Включается с RCL 2;
+ * максимальное количество extensions берётся из `CONTROLLER_STRUCTURES`.
+ * Не имеет побочных эффектов.
+ */
 export function planBaseLayout(room: Room): BaseLayoutDecision {
     const rcl = room.controller?.level ?? 0;
 
@@ -150,6 +185,16 @@ export function planBaseLayout(room: Room): BaseLayoutDecision {
 
 /* ---------- Конфигурация экспансии -------------------------------------- */
 
+/**
+ * Конфигурация экспансии: тела крипов трёх удалённых ролей, целевое
+ * количество, предпочтительная целевая комната и блеклист.
+ *
+ * @remarks
+ * Хранится как литерал `as-`-типизированный объект (без `as const`), чтобы
+ * поля-массивы остались совместимы с `BodyPartConstant[]` без сужения.
+ * `preferredTarget` и `blacklist` хардкоднуты под конкретный шард
+ * (`E54`/`E55`) — при переносе их нужно обновить.
+ */
 export const EXPANSION = {
     reserverBody: [CLAIM, CLAIM, MOVE, MOVE] as BodyPartConstant[],
     claimerBody: [CLAIM, MOVE, MOVE, MOVE] as BodyPartConstant[],
@@ -161,6 +206,10 @@ export const EXPANSION = {
     blacklist: ['E54N32', 'E54N30']
 };
 
+/**
+ * Список ролей, для которых при спавне требуется `Memory.targetRoom`.
+ * Используется в `spawn.trySpawn` для автоподстановки `targetRoom` в память.
+ */
 export const REMOTE_ROLES: RoleKey[] = [
     ROLE.RHARVESTER,
     ROLE.RESERVER,
@@ -169,16 +218,27 @@ export const REMOTE_ROLES: RoleKey[] = [
 
 /* ---------- Фазы экспансии ---------------------------------------------- */
 
+/** Текущая фаза экспансии. */
 export type ExpansionPhase = 'idle' | 'reserve' | 'claim' | 'harvest';
 
+/** Решение по следующему шагу экспансии для исполнительного слоя. */
 export interface ExpansionDecision {
+    /** Выполнять ли действие в текущем тике. */
     enabled: boolean;
+    /** Фаза экспансии (`idle`/`reserve`/`claim`/`harvest`). */
     phase: ExpansionPhase;
+    /** Имя «домашней» комнаты, из которой спавним крип. */
     homeRoom: string | null;
+    /** Имя выбранной целевой комнаты. */
     targetRoom: string | null;
+    /** Роль, которую нужно доспавнить (или `null`, если пока не нужно). */
     desiredRole: RoleKey | null;
 }
 
+/**
+ * Возвращает `true`, если выполнены все «гейты» для экспансии: есть owned
+ * домашняя комната, RCL ≥ 3 и GCL ≥ 2.
+ */
 export function getExpansionGates(home: Room, gclLevel: number | undefined): boolean {
     if (!home.controller || !home.controller.my) {
         return false;
@@ -195,6 +255,17 @@ export function getExpansionGates(home: Room, gclLevel: number | undefined): boo
     return true;
 }
 
+/**
+ * Чистая функция: выбирает фазу и желаемую роль для экспансии на основе
+ * текущего состояния комнаты-цели и количества уже занятых на ней крипов.
+ *
+ * Ход решения:
+ * 1. Если целевая комната уже принадлежит нам — фаза `harvest`, дозаказываем
+ *    `rharvester` до `EXPANSION.rharvesterCount`.
+ * 2. Иначе сначала `reserver` до `EXPANSION.reserverCount`.
+ * 3. Затем `claimer` до `EXPANSION.claimerCount`.
+ * 4. Когда запасы удовлетворены — `enabled: false`.
+ */
 export function planExpansion(
     home: Room | null,
     targetRoom: string | null,
@@ -264,6 +335,13 @@ export function planExpansion(
 
 /* ---------- Выбор «домашней» комнаты ----------------------------------- */
 
+/**
+ * Выбирает «домашнюю» комнату для экспансии: owned-комнату с наибольшим RCL,
+ * при равенстве — с максимальным `energyCapacityAvailable`.
+ *
+ * @param rooms Словарь `имя → Room` (обычно `Game.rooms`).
+ * @returns Лучшую owned-комнату или `null`, если owned-комнат нет.
+ */
 export function findHomeRoom(rooms: Record<string, Room>): Room | null {
     let bestRoom: Room | null = null;
 
@@ -296,6 +374,23 @@ export function findHomeRoom(rooms: Record<string, Room>): Room | null {
 
 /* ---------- Выбор целевой соседней комнаты ------------------------------ */
 
+/**
+ * Выбирает соседнюю комнату для экспансии. Приоритеты:
+ * 1. `preferred`, если он есть среди соседей, не в блеклисте и имеет
+ *    нормальный статус.
+ * 2. Иначе первый сосед (в алфавитном порядке направлений выходов),
+ *    не в бтеклисте, отличающийся от `previousTarget` и находящийся
+ *    в том же shard-е, что и `homeName`, со статусом `'normal'`.
+ *
+ * @param homeName       Имя домашней комнаты.
+ * @param exitsCache     Кэш `Game.map.describeExits` (TTL — `EXITS_CACHE_TTL`).
+ *                       Функция обновляет кэш по необходимости.
+ * @param blacklist      Список комнат, которые нельзя выбирать.
+ * @param preferred      Предпочтительная цель (или `undefined`).
+ * @param previousTarget Прошлая цель (исключается из перебора, чтобы не
+ *                       зацикливаться).
+ * @returns Имя выбранной комнаты или `null`, если подходящей нет.
+ */
 export function pickExpansionTarget(
     homeName: string,
     exitsCache: NonNullable<Memory['_exitsCache']>,
@@ -385,12 +480,20 @@ export function pickExpansionTarget(
     return null;
 }
 
+/** Проверяет, что статус комнаты — `'normal'` (не SK и не unavailable). */
 function isNormalRoomStatus(status: RoomStatus): boolean {
     return status.status === 'normal';
 }
 
 /* ---------- Подсчёт крипов по роли для экспансии ------------------------ */
 
+/**
+ * Считает количество крипов каждой удалённой роли, привязанных к
+ * `targetRoom` (по `creep.memory.targetRoom`).
+ *
+ * @param targetRoom Имя целевой комнаты экспансии.
+ * @returns Объект с числом `rharvester`/`reserver`/`claimer`.
+ */
 export function countExpansionCreeps(targetRoom: string): {
     rharvester: number;
     reserver: number;

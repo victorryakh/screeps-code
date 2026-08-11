@@ -72,7 +72,12 @@ export const EXTENSION_CHECK_INTERVAL = 10;
 
 /**
  * Битовая маска, определяющая непроходимые клетки стен в маске рельефа
- * комнаты. Используется числовой литерал `1`, если константа
- * `TERRAIN_MASK_WALL` не определена (например, вне среды Screeps).
+ * комнаты. Используется в {@link planBaseLayout} и {@link ensureExtensions}
+ * для отсева клеток, на которых нельзя строить расширения.
+ *
+ * @remarks
+ * В оффлайн-окружениях (юнит-тесты, симулятор без полного API)
+ * `TERRAIN_MASK_WALL` может быть не определена — в этом случае подставляется
+ * числовой литерал `1`, совпадающий со значением константы в рантайме Screeps.
  */
 export const WALL_TERRAIN: TERRAIN_MASK_WALL = (typeof TERRAIN_MASK_WALL !== 'undefined') ? TERRAIN_MASK_WALL : 1;

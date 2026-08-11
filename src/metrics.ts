@@ -26,12 +26,24 @@ const TRIP_SAMPLES_LIMIT = 20;
 
 type PositionLike = RoomPosition | { pos: RoomPosition };
 
+/** Возвращает `RoomPosition`, разворачивая объекты с `.pos` (Source, Structure и т.п.). */
 function unwrap(pos: PositionLike): RoomPosition {
     return 'pos' in pos ? pos.pos : pos;
 }
 
 /* ---------- Инициализация и тик-учёт ------------------------------------- */
 
+/**
+ * Инициализирует глобальную структуру `Memory.metrics` и слоты
+ * `room.memory.metrics` для всех owned-комнат. Вызывается из {@link loop}
+ * в начале каждого тика.
+ *
+ * @remarks
+ * При `Memory.debug === true` дополнительно обновляет `lastRcl` в каждой
+ * комнате (стоит считать дорогим — лишняя запись в память).
+ * Также инициализирует `Memory._notified`, если оно не определено (для
+ * дедупликации `Game.notify` в {@link log}).
+ */
 export function init(): void {
     if (!Memory.metrics) {
         Memory.metrics = {
@@ -69,12 +81,21 @@ export function init(): void {
     }
 }
 
+/**
+ * Запоминает `Game.cpu.getUsed()` на старте тика. Парный вызов —
+ * {@link tickEnd}, вычисляющий дельту.
+ */
 export function tickStart(): void {
     if (typeof Game.cpu !== 'undefined' && typeof Game.cpu.getUsed === 'function') {
         Memory._tickStartCpu = Game.cpu.getUsed();
     }
 }
 
+/**
+ * Завершает тик учёта: инкрементирует `Memory.metrics.ticks`, вычисляет
+ * `lastTickCpu` (дельта от `tickStart` или абсолютное значение, если
+ * `tickStart` не вызывался) и сохраняет `lastBucket`.
+ */
 export function tickEnd(): void {
     if (!Memory.metrics) {
         return;
@@ -97,6 +118,16 @@ export function tickEnd(): void {
 
 /* ---------- Счётчики событий --------------------------------------------- */
 
+/**
+ * Учитывает спавн крипа: инкрементирует `spawnsByRole[role]` и добавляет
+ * `cost` в `totalSpawnEnergy`. Вызывается из `spawn.ts` (подключение —
+ * следующий шаг, см. STRATEGY.md).
+ *
+ * @param role       Имя роли крипа.
+ * @param cost       Полная стоимость тела в энергии.
+ * @param _bodyParts Число частей тела (зарезервировано для будущих метрик,
+ *                   сейчас игнорируется).
+ */
 export function recordSpawn(role: string, cost: number, _bodyParts: number): void {
     if (!Memory.metrics) {
         return;
@@ -107,6 +138,15 @@ export function recordSpawn(role: string, cost: number, _bodyParts: number): voi
     m.totalSpawnEnergy = (m.totalSpawnEnergy || 0) + cost;
 }
 
+/**
+ * Учитывает смерть крипа: инкрементирует `deathsByRole[role]`.
+ *
+ * @param role     Имя роли умершего крипа.
+ * @param ageTicks Возраст крипа в тиках. Зарезервировано для подробной
+ *                 статистики при `Memory.debug === true`; в текущей
+ *                 реализации явно игнорируется через `void` (подавление
+ *                 предупреждения о неиспользуемом параметре).
+ */
 export function recordCreepDeath(role: string, ageTicks: number): void {
     if (!Memory.metrics) {
         return;
@@ -127,15 +167,30 @@ export function recordCreepDeath(role: string, ageTicks: number): void {
 
 /* ---------- Экономика пути и рейсов ------------------------------------- */
 
+/**
+ * Результат оценки экономики одного рейса крипа между двумя точками.
+ * Используется для анализа эффективности маршрутов и подбора ролей.
+ */
 export interface TripEconomics {
+    /** Длина пути в клетках (из кэша `moveCached` или `PathFinder.search`). */
     distance: number;
+    /** Оценка длительности в один конец (в тиках), равна `distance`. */
     oneWayTicks: number;
+    /** Оценка полного рейса туда-обратно: `oneWayTicks * 2 + 2`. */
     roundTripTicks: number;
+    /** Грузоподъёмность крипа: `CARRY-частей * CARRY_CAPACITY`. */
     carryCapacity: number;
+    /** Средняя эффективность: `carryCapacity / roundTripTicks`. */
     energyPerTick: number;
+    /** TTL кэша пути для этого рейса (наследует `HOME_PATH_TTL`). */
     pathTtl?: number;
 }
 
+/**
+ * Возвращает длину пути из `creep.memory._move`, если кэш валиден
+ * (назначение и время совпадают). Возвращает `null`, если кэша нет
+ * или он устарел.
+ */
 function cachedPathDistance(
     creep: Creep,
     dest: RoomPosition
@@ -161,6 +216,7 @@ function cachedPathDistance(
     return move.path.length;
 }
 
+/** Считает количество живых `CARRY`-частей тела крипа. */
 function carryParts(creep: Creep): number {
     let n = 0;
 
@@ -173,6 +229,20 @@ function carryParts(creep: Creep): number {
     return n;
 }
 
+/**
+ * Оценивает экономику рейса крипа между `from` и `to`: считает длину пути
+ * (из кэша `moveCached` или `PathFinder.search({plainCost:1, swampCost:5})`),
+ * производную длительность и эффективность по грузоподъёмности.
+ *
+ * @param creep Крип, для которого оценивается рейс.
+ * @param from  Стартовая позиция или объект с полем `pos`.
+ * @param to    Конечная позиция или объект с полем `pos`.
+ * @returns Объект {@link TripEconomics} с дистанцией, временем и эффективностью.
+ *
+ * @remarks
+ * Побочный эффект: при `Memory.debug === true` пушит сэмпл в
+ * `creep.room.memory.metrics.tripSamples` (кольцевой буфер на 20 записей).
+ */
 export function tripEconomics(
     creep: Creep,
     from: PositionLike,
@@ -238,6 +308,16 @@ export function tripEconomics(
     };
 }
 
+/**
+ * Возвращает длину пути между двумя позициями через `PathFinder.search`
+ * (без аллокации массива). Если поиск не завершён, возвращает чебышёва
+ * расстояние как оценку.
+ *
+ * @param fromPos Начало маршрута.
+ * @param toPos   Конец маршрута.
+ * @param _opts   Зарезервировано для будущего кэширования (сейчас
+ *                игнорируется).
+ */
 export function pathLengthCached(
     fromPos: RoomPosition,
     toPos: RoomPosition,
@@ -261,6 +341,13 @@ export function pathLengthCached(
 
 /* ---------- Подсчёт состава ролей в комнате ----------------------------- */
 
+/**
+ * Сохраняет снимок состава ролей комнаты в `room.memory.metrics.lastRoleCounts`.
+ * Безопасно вызывать для комнат без инициализированных метрик (no-op).
+ *
+ * @param roomName Имя комнаты.
+ * @param counts   Соответствие `роль → количество`.
+ */
 export function recordRoomCounts(roomName: string, counts: Record<string, number>): void {
     const r = Game.rooms[roomName];
 
@@ -273,6 +360,13 @@ export function recordRoomCounts(roomName: string, counts: Record<string, number
 
 /* ---------- Дамп для ручного вызова ------------------------------------- */
 
+/**
+ * Собирает плоский дамп глобальных и per-room метрик. Удобно вызывать
+ * вручную через `console.log(JSON.stringify(metrics.summarize()))`.
+ *
+ * @returns Объект с `metrics` (глобальные счётчики) и `rooms` (RCL,
+ *          `lastRoleCounts`, число сэмплов для каждой owned-комнаты).
+ */
 export function summarize(): Record<string, unknown> {
     const rooms: Record<string, unknown> = {};
 

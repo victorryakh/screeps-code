@@ -1,6 +1,11 @@
 import { ROLE, HOME_PATH_TTL, REPAIR_THRESHOLD } from './constants';
 import { EXPANSION } from './strategy';
 
+/**
+ * Допустимая цель для функций перемещения: явная `RoomPosition` или
+ * любой игровой объект с полем `pos` (`Source`, `Structure`, `Creep`,
+ * `ConstructionSite` и т.п.).
+ */
 type MoveDest = RoomPosition | { pos: RoomPosition };
 
 /**
@@ -62,6 +67,12 @@ export function moveCached(
     return creep.moveTo(dest, opts);
 }
 
+/**
+ * Считает суммарную стоимость тела крипа в энергии по прайсу `BODYPART_COST`.
+ *
+ * @param body Массив частей тела.
+ * @returns Полная стоимость спавна крипа с таким телом.
+ */
 export function bodyCost(body: BodyPartConstant[]): number {
     let cost = 0;
 
@@ -72,6 +83,15 @@ export function bodyCost(body: BodyPartConstant[]): number {
     return cost;
 }
 
+/**
+ * Возвращает массив частей тела по имени роли. Базовые роли хардкоднуты,
+ * удалённые (`RHARVESTER`, `RESERVER`, `CLAIMER`) берутся из {@link EXPANSION}.
+ *
+ * @param role Имя роли. Лучше передавать значения из {@link ROLE}, но тип
+ *             расширен до `string` ради совместимости с устаревшими данными
+ *             в `Memory.creeps`. Для неизвестной роли возвращается
+ *             минимальное тело `[WORK, CARRY, MOVE]`.
+ */
 export function bodyFor(role: string): BodyPartConstant[] {
     switch (role) {
         case ROLE.HARVESTER:
@@ -100,6 +120,17 @@ export function bodyFor(role: string): BodyPartConstant[] {
     }
 }
 
+/**
+ * Добывает ресурс из источника. Если крип не в зоне действия — перемещается
+ * к нему через {@link moveCached}.
+ *
+ * @param creep  Добывающий крип.
+ * @param source Источник (`Source`, `Mineral`, `Deposit`). `null`/`undefined`
+ *               считается ошибкой и возвращает `ERR_INVALID_TARGET`.
+ * @param opts   Опции `MoveToOpts`, пробрасываемые в `moveCached`.
+ * @returns `OK` при успешной добыче, `ERR_INVALID_TARGET` без источника,
+ *          или код перемещения.
+ */
 export function harvestEnergy(
     creep: Creep,
     source: Source | Mineral | Deposit | null | undefined,
@@ -116,10 +147,28 @@ export function harvestEnergy(
     return OK;
 }
 
+/**
+ * Возвращает ближайший к крипу источник по пути (`findClosestByPath`).
+ *
+ * @param creep      Крип, относительно которого ищется источник.
+ * @param activeOnly Если `true`, ищет только среди активных
+ *                   (`FIND_SOURCES_ACTIVE`); иначе — все источники в комнате.
+ * @returns Ближайший `Source` или `null`, если в комнате нет подходящих.
+ */
 export function findClosestSource(creep: Creep, activeOnly = false): Source | null {
     return creep.pos.findClosestByPath(activeOnly ? FIND_SOURCES_ACTIVE : FIND_SOURCES);
 }
 
+/**
+ * Передаёт `RESOURCE_ENERGY` в цель. Если не в зоне — перемещается через
+ * {@link moveCached}.
+ *
+ * @param creep  Крип-донор.
+ * @param target Получатель энергии: `Creep`, `Structure` и т.п. `null`/
+ *               `undefined` возвращает `ERR_INVALID_TARGET`.
+ * @param opts   Опции `MoveToOpts`, пробрасываемые в `moveCached`.
+ * @returns `OK`, `ERR_INVALID_TARGET` или код перемещения.
+ */
 export function transferEnergy(
     creep: Creep,
     target: AnyCreep | Structure | null | undefined,
@@ -136,6 +185,16 @@ export function transferEnergy(
     return OK;
 }
 
+/**
+ * Ищет ближайшую структуру заданного типа, у которой есть свободный объём
+ * под `RESOURCE_ENERGY` (например, `SPAWN`/`EXTENSION` по умолчанию).
+ *
+ * @param creep Крип, относительно которого ищется цель.
+ * @param types Допустимые `StructureConstant`. По умолчанию —
+ *              `[STRUCTURE_SPAWN, STRUCTURE_EXTENSION]`.
+ * @returns Подходящая `Structure` или `null`, если в комнате нет
+ *          структур со свободным местом.
+ */
 export function findEnergyTransferTarget(
     creep: Creep,
     types: StructureConstant[] = [STRUCTURE_SPAWN, STRUCTURE_EXTENSION]
@@ -148,6 +207,15 @@ export function findEnergyTransferTarget(
     });
 }
 
+/**
+ * Апгрейдит контроллер текущей комнаты крипа. Если не в зоне — перемещается
+ * через {@link moveCached}. Работает только в owned-комнате (`controller.my`).
+ *
+ * @param creep Крип-апгрейдер.
+ * @param opts  Опции `MoveToOpts`, пробрасываемые в `moveCached`.
+ * @returns `OK`, `ERR_INVALID_TARGET` (нет контроллера или он чужой) или
+ *          код перемещения.
+ */
 export function upgradeRoomController(creep: Creep, opts?: MoveToOpts): ScreepsReturnCode {
     const controller = creep.room.controller;
 
@@ -162,6 +230,15 @@ export function upgradeRoomController(creep: Creep, opts?: MoveToOpts): ScreepsR
     return OK;
 }
 
+/**
+ * Возвращает ближайший к крипу свой construction site, удовлетворяющий
+ * фильтру. По умолчанию выбираются любые недостроенные сайты.
+ *
+ * @param creep  Крип-строитель.
+ * @param filter Дополнительный предикат отбора. По умолчанию —
+ *               `s.progress < s.progressTotal`.
+ * @returns Подходящий `ConstructionSite` или `null`.
+ */
 export function findConstructionSite(
     creep: Creep,
     filter: (s: ConstructionSite) => boolean = (s) => s.progress < s.progressTotal
@@ -171,6 +248,15 @@ export function findConstructionSite(
     });
 }
 
+/**
+ * Строит на конкретном construction site. Если крип не в зоне — перемещается
+ * через {@link moveCached}.
+ *
+ * @param creep Крип-строитель.
+ * @param site  Целевой сайт. `null`/`undefined` возвращает `ERR_INVALID_TARGET`.
+ * @param opts  Опции `MoveToOpts`, пробрасываемые в `moveCached`.
+ * @returns `OK`, `ERR_INVALID_TARGET` или код перемещения.
+ */
 export function buildAt(
     creep: Creep,
     site: ConstructionSite | null | undefined,
@@ -187,6 +273,15 @@ export function buildAt(
     return OK;
 }
 
+/**
+ * Возвращает ближайшую структуру, требующую ремонта: `hits < hitsMax * threshold`.
+ * Стены и рампарты намеренно исключены — бот их сейчас не чинит.
+ *
+ * @param creep     Крип-ремонтник.
+ * @param threshold Доля от `hitsMax` (диапазон `0..1`), ниже которой объект
+ *                  считается повреждённым. По умолчанию — {@link REPAIR_THRESHOLD}.
+ * @returns Подходящая `Structure` или `null`.
+ */
 export function findRepairTarget(creep: Creep, threshold: number = REPAIR_THRESHOLD): Structure | null {
     return creep.pos.findClosestByPath(FIND_STRUCTURES, {
         filter: (s) => {
@@ -206,6 +301,16 @@ export function findRepairTarget(creep: Creep, threshold: number = REPAIR_THRESH
     });
 }
 
+/**
+ * Чинит целевую структуру. Если крип не в зоне — перемещается через
+ * {@link moveCached}.
+ *
+ * @param creep  Крип-ремонтник.
+ * @param target Целевая `Structure`. `null`/`undefined` возвращает
+ *               `ERR_INVALID_TARGET`.
+ * @param opts   Опции `MoveToOpts`, пробрасываемые в `moveCached`.
+ * @returns `OK`, `ERR_INVALID_TARGET` или код перемещения.
+ */
 export function repairAt(
     creep: Creep,
     target: Structure | null | undefined,

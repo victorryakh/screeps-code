@@ -1,3 +1,16 @@
+/* ============================================================================
+ * Роль `rharvester`: удалённая добыча энергии.
+ *
+ * Тело: задаётся в `EXPANSION.rharvesterBody` (по умолчанию
+ * [WORK, WORK, CARRY, MOVE, MOVE]).
+ * Маршрут: `home` → `targetRoom` → активный источник → `home` → сдача.
+ *
+ * Кэш пути: на удалённых переходах используется `REMOTE_PATH_TTL` (50 тиков),
+ * на коротком плече `home` → `SPAWN/EXTENSION` — `HOME_PATH_TTL` (25 тиков).
+ * Сдача в `SPAWN`/`EXTENSION` приоритетна; при их отсутствии — в `storage`;
+ * если и storage заполнен — энергия роняется на пол.
+ * ==========================================================================*/
+
 import {
     moveCached,
     harvestEnergy,
@@ -7,6 +20,12 @@ import {
 } from '../utilities';
 import { HOME_PATH_TTL, REMOTE_PATH_TTL } from '../constants';
 
+/**
+ * Выполняет один шаг rharvester-а. См. описание модуля.
+ *
+ * @param creep Крип с `role === ROLE.RHARVESTER`. Требует заполненных
+ *              `memory.homeRoom` и `memory.targetRoom`.
+ */
 export function run(creep: Creep): void {
     if (!creep.memory.targetRoom) {
         return;

@@ -1,3 +1,16 @@
+/* ============================================================================
+ * Роль `builder`: строительство и fallback-апгрейд.
+ *
+ * Тело: [WORK, CARRY, CARRY, MOVE, MOVE] (2 CARRY для переноски).
+ * Стейт-машина:
+ *   - `memory.building === true`  → ищет и строит construction-сайт.
+ *   - `memory.building === false` → добывает энергию.
+ *   - Переход `true → false`: store пуст (с эмоутом 🔄 harvest).
+ *   - Переход `false → true`: store полон (с эмоутом 🚧 build).
+ * При поиске сайта сначала исключаются ROAD (их бот не строит), затем —
+ * любой оставшийся недостроенный. Если сайтов нет — апгрейдит контроллер.
+ * ==========================================================================*/
+
 import {
     harvestEnergy,
     findClosestSource,
@@ -6,6 +19,11 @@ import {
     upgradeRoomController
 } from '../utilities';
 
+/**
+ * Выполняет один шаг builder-а. См. описание модуля.
+ *
+ * @param creep Крип с `role === ROLE.BUILDER`.
+ */
 export function run(creep: Creep): void {
     if (typeof creep.memory.building !== 'boolean') {
         creep.memory.building = false;
