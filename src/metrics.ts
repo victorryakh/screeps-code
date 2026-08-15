@@ -83,11 +83,12 @@ export function init(): void {
 
 /**
  * Запоминает `Game.cpu.getUsed()` на старте тика. Парный вызов —
- * {@link tickEnd}, вычисляющий дельту.
+ * {@link tickEnd}, вычисляющий дельту. Значение хранится в `global`, а не в
+ * `Memory`, чтобы не раздувать персистируемый JSON каждый тик.
  */
 export function tickStart(): void {
     if (typeof Game.cpu !== 'undefined' && typeof Game.cpu.getUsed === 'function') {
-        Memory._tickStartCpu = Game.cpu.getUsed();
+        (global as { _tickStartCpu?: number })._tickStartCpu = Game.cpu.getUsed();
     }
 }
 
@@ -104,8 +105,9 @@ export function tickEnd(): void {
     Memory.metrics.ticks = (Memory.metrics.ticks || 0) + 1;
 
     if (typeof Game.cpu !== 'undefined') {
-        if (Memory._tickStartCpu !== undefined) {
-            Memory.metrics.lastTickCpu = Game.cpu.getUsed() - Memory._tickStartCpu;
+        const startCpu = (global as { _tickStartCpu?: number })._tickStartCpu;
+        if (startCpu !== undefined) {
+            Memory.metrics.lastTickCpu = Game.cpu.getUsed() - startCpu;
         } else {
             Memory.metrics.lastTickCpu = Game.cpu.getUsed();
         }

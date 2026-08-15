@@ -9,6 +9,7 @@
 import { ROLE } from './constants';
 import { REMOTE_ROLES } from './strategy';
 import { bodyFor, bodyCost } from './utilities';
+import { recordSpawn } from './metrics';
 
 /**
  * Пытается создать крипа заданной роли в комнате. Алгоритм:
@@ -84,6 +85,7 @@ export function trySpawn(room: Room, role: string): boolean {
 
     if (result === OK) {
         room.memory._spawnCooldown = Game.time;
+        recordSpawn(role, bodyCost(body), body.length);
         return true;
     }
 

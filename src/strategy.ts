@@ -202,8 +202,12 @@ export const EXPANSION = {
     reserverCount: 1,
     claimerCount: 1,
     rharvesterCount: 2,
-    preferredTarget: 'E55N31',
-    blacklist: ['E54N32', 'E54N30']
+    // Поля `preferredTarget` и `blacklist` перенесены в `Memory.expansionPreferredTarget` /
+    // `Memory.expansionBlacklist`, чтобы не хардкодить сектор. Пример для текущей
+    // home (E53N34) — нейтральные комнаты `E53N33` (не в чёрном списке) и
+    // `E54N33` (тоже не в чёрном списке) подходят как цели экспансии.
+    preferredTarget: undefined as string | undefined,
+    blacklist: [] as string[]
 };
 
 /**

@@ -167,9 +167,7 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
         return;
     }
 
-    const spawn = room.find(FIND_MY_SPAWNS, {
-        filter: (s) => s.my
-    })[0];
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
 
     if (!spawn) {
         return;

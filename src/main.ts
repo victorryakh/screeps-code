@@ -36,7 +36,10 @@ export function loop(): void {
     metrics.init();
 
     for (const name in Memory.creeps) {
-        if (!Game.creeps[name]) {
+        const mem = Memory.creeps[name];
+        if (!Game.creeps[name] && mem) {
+            const age = Game.time - (mem._birthTick || Game.time);
+            metrics.recordCreepDeath(mem.role, age);
             delete Memory.creeps[name];
         }
     }
@@ -51,6 +54,46 @@ export function loop(): void {
         if (!creep.memory.homeRoom) {
             creep.memory.homeRoom = creep.room.name;
         }
+
+        if (creep.memory._birthTick === undefined) {
+            creep.memory._birthTick = Game.time;
+        }
+    }
+
+    // Чистим устаревшие записи `Memory.rooms`, для которых в `Game.rooms`
+    // нет живой `Room` и ни один крип не считает её своей home. Без этой
+    // чистки старые комнаты (например, потерянный home) накапливаются и
+    // ежегодно сериализуются/парсятся впустую.
+    for (const roomName in Memory.rooms) {
+        if (Game.rooms[roomName]) {
+            continue;
+        }
+        const hasCreepWithHome = Object.values(Game.creeps).some(
+            (c) => c && c.memory && c.memory.homeRoom === roomName
+        );
+        if (!hasCreepWithHome) {
+            delete Memory.rooms[roomName];
+        }
+    }
+
+    // Чистим `Memory._exitsCache` от комнат, которых больше нет в `Game.rooms`.
+    // Кэш накапливается со временем (TTL 5000 тиков, но если home сменился —
+    // старые ключи висят бесконечно).
+    if (Memory._exitsCache) {
+        for (const roomName in Memory._exitsCache) {
+            if (!Game.rooms[roomName]) {
+                delete Memory._exitsCache[roomName];
+            }
+        }
+    }
+
+    // Одноразовая чистка: убираем `Memory._tickStartCpu`, который раньше
+    // использовался как runtime-переменная в `metrics.ts`. Теперь она
+    // хранится в `global`, и в `Memory` ей делать нечего. Без явного
+    // `delete` Screeps будет хранить это поле вечно (сериализуется весь
+    // `Memory`-объект).
+    if ('_tickStartCpu' in Memory) {
+        delete (Memory as { _tickStartCpu?: number })._tickStartCpu;
     }
 
     const ownedRoomNames: string[] = [];
