@@ -100,6 +100,24 @@ export function planSpawnOrder(
         ? targets.upgrader
         : Math.min(counts[ROLE.UPGRADER] || 0, 1);
 
+    // Когда downgrade-буфер исчерпан, приоритет «сначала upgrader»
+    // контр-продуктивен: без harvesters энергии в spawn/extensions нет,
+    // upgrader простаивает, контроллер продолжает голодать. В этом
+    // состоянии временно поднимаем harvester на первое место — пока не
+    // появится хотя бы один. Как только harvester >= 1, возвращаемся
+    // к обычному порядку (upgrader → harvester → ...).
+    const harvesterCount = counts[ROLE.HARVESTER] || 0;
+    const needsHarvesterFirst = !canUpgrade && harvesterCount < 1;
+
+    if (needsHarvesterFirst) {
+        return [
+            [ROLE.HARVESTER, targets.harvester],
+            [ROLE.UPGRADER, upgraderTarget],
+            [ROLE.BUILDER, targets.builder],
+            [ROLE.REPAIRER, targets.repairer]
+        ];
+    }
+
     return [
         [ROLE.UPGRADER, upgraderTarget],
         [ROLE.HARVESTER, targets.harvester],
