@@ -11,6 +11,7 @@ import * as room from './room';
 import * as expansion from './expansion';
 import * as metrics from './metrics';
 import * as pixels from './utils/pixels';
+import * as log from './log';
 
 console.log("Started script at", new Date().toISOString())
 
@@ -25,7 +26,8 @@ console.log("Started script at", new Date().toISOString())
  * 3. Очистить `Memory.creeps` от мёртвых крипов.
  * 4. Проставить `memory.homeRoom` крипам, у которых его нет.
  * 5. Собрать owned-комнаты (с `controller.my`).
- * 6. Если owned-комнат нет — `metrics.tickEnd()` и выход.
+ * 6. Если owned-комнат нет — залогировать `warn` (с дедупликацией через
+ *    `log.notifyOnce`) для оповещения пользователя о простое, `metrics.tickEnd()` и выход.
  * 7. Для каждой owned-комнаты вызвать `room.run(r)`.
  * 8. `expansion.run()` — попытка одного шага экспансии.
  * 9. `pixels.generatePixel()` — выпустить пиксели при достаточном bucket.
@@ -111,6 +113,13 @@ export function loop(): void {
     }
 
     if (ownedRoomNames.length === 0) {
+        // Нет owned-комнат: бот бездействует. Сообщаем один раз в ~83 минуты
+        // (дедупликация в log.ts), чтобы пользователь знал о потере базы.
+        // Авто-восстановление намеренно не реализовано (см. STRATEGY.md,
+        // раздел «Что отсутствует»): без spawn нельзя создать крипов, а
+        // claim/reserve требуют предварительно заспавненных крипов. Поэтому
+        // единственный безопасный сигнал — алерт.
+        log.warn('main', 'no owned rooms — bot is idle, respawn or claim a new room to recover');
         metrics.tickEnd();
         return;
     }
