@@ -113,15 +113,71 @@ export function loop(): void {
     }
 
     if (ownedRoomNames.length === 0) {
-        // Нет owned-комнат: бот бездействует. Сообщаем один раз в ~83 минуты
-        // (дедупликация в log.ts), чтобы пользователь знал о потере базы.
-        // Авто-восстановление намеренно не реализовано (см. STRATEGY.md,
-        // раздел «Что отсутствует»): без spawn нельзя создать крипов, а
-        // claim/reserve требуют предварительно заспавненных крипов. Поэтому
-        // единственный безопасный сигнал — алерт.
-        log.warn('main', 'no owned rooms — bot is idle, respawn or claim a new room to recover');
-        metrics.tickEnd();
-        return;
+        // Нет owned-комнат в `Game.rooms` — но это ещё не значит, что у нас
+        // нет ни одного спавна. `Game.rooms` доступен только при наличии
+        // vision (свои крипы в комнате, активный safeMode, observer и т.д.).
+        // Ситуация, в которой спавн наш, но vision временно отсутствует
+        // (например, последний крип погиб и safeMode ещё активен), приводит
+        // к deadlock: бот не видит комнату → не спавнит крипов → vision
+        // пропадает навсегда. Поэтому при пустом `Game.rooms` пробуем
+        // воскресить спавн через `Memory._knownSpawnIds` (id спавнов,
+        // которые бот видел хотя бы раз). `Game.getObjectById()` вернёт
+        // объект, если vision есть (например, через safeMode), и вернёт
+        // null если нет — тогда остаётся только алерт.
+        if (!Memory._knownSpawnIds) {
+            Memory._knownSpawnIds = {} as Record<string, true>;
+        }
+        let rescued = 0;
+        for (const spawnId in Memory._knownSpawnIds) {
+            const spawn = Game.getObjectById(spawnId as Id<StructureSpawn>);
+            if (!spawn) {
+                continue;
+            }
+            // Vision появилась — закрепляем комнату за ownedRoomNames и
+            // удаляем из known (после `room.run` мы заново её добавим).
+            const roomName = spawn.room.name;
+            ownedRoomNames.push(roomName);
+            rescued++;
+        }
+        if (rescued === 0) {
+            // Нет ни одной комнаты с vision. Сообщаем один раз в ~83 минуты
+            // (дедупликация в log.ts), чтобы пользователь знал о потере базы.
+            // Авто-восстановление намеренно не реализовано (см. STRATEGY.md,
+            // раздел «Что отсутствует»): без spawn нельзя создать крипов, а
+            // claim/reserve требуют предварительно заспавненных крипов. Поэтому
+            // единственный безопасный сигнал — алерт.
+            log.warn('main', 'no owned rooms — bot is idle, respawn or claim a new room to recover');
+            metrics.tickEnd();
+            return;
+        }
+    }
+
+    // Регистрируем id всех спавнов наших owned-комнат, чтобы в будущем
+    // (после потери vision) можно было воскресить доступ через
+    // `Game.getObjectById` (см. блок выше).
+    if (!Memory._knownSpawnIds) {
+        Memory._knownSpawnIds = {} as Record<string, true>;
+    }
+    for (const roomName of ownedRoomNames) {
+        const r = Game.rooms[roomName];
+        if (!r) {
+            continue;
+        }
+        for (const spawn of r.find(FIND_MY_SPAWNS)) {
+            Memory._knownSpawnIds[spawn.id] = true;
+        }
+    }
+    // Чистим записи о спавнах, которые больше не наши (controller.my === false
+    // или комната потеряна). Без чистки `_knownSpawnIds` будет расти вечно.
+    for (const spawnId in Memory._knownSpawnIds) {
+        const spawn = Game.getObjectById(spawnId as Id<StructureSpawn>);
+        if (!spawn) {
+            continue;
+        }
+        const room = spawn.room;
+        if (room.controller && !room.controller.my) {
+            delete Memory._knownSpawnIds[spawnId];
+        }
     }
 
     for (const roomName of ownedRoomNames) {
