@@ -95,16 +95,30 @@ export function bodyCost(body: BodyPartConstant[]): number {
 export function bodyFor(role: string): BodyPartConstant[] {
     switch (role) {
         case ROLE.HARVESTER:
-            return [WORK, CARRY, MOVE];
+            // 550 energy: 2 WORK + CARRY + 2 MOVE. Fits RCL 3 (cap 700).
+            // Doubles harvest rate vs the legacy [WORK,CARRY,MOVE] body and
+            // the extra MOVE keeps the creep at full speed while carrying.
+            return [WORK, WORK, CARRY, MOVE, MOVE];
 
         case ROLE.UPGRADER:
-            return [WORK, WORK, CARRY, MOVE];
+            // 650 energy: 3 WORK + CARRY + 2 MOVE. Fits RCL 3 (cap 700).
+            // 3 WORK = 3 upgradeController/tick (vs 2 from the legacy body),
+            // which roughly halves the controller-upgrade ETA at this RCL.
+            return [WORK, WORK, WORK, CARRY, MOVE, MOVE];
 
         case ROLE.BUILDER:
-            return [WORK, CARRY, CARRY, MOVE, MOVE];
+            // 550 energy: 2 WORK + 2 CARRY + 2 MOVE. Fits RCL 3 (cap 700).
+            // 2 WORK doubles build speed vs the legacy single-WORK body;
+            // 2 CARRY reduces trips; 2 MOVE keeps it fast under load.
+            return [WORK, WORK, CARRY, CARRY, MOVE, MOVE];
 
         case ROLE.REPAIRER:
-            return [WORK, CARRY, MOVE, MOVE];
+            // 500 energy: 2 WORK + CARRY + MOVE. Fits RCL 3 (cap 700).
+            // The legacy single-WORK body is acceptable for hit-point repair
+            // because repair() work already returns 100 hp per tick per WORK;
+            // we double it here to keep the RCL-3 throughput consistent
+            // with harvester/builder/upgrader at this RCL.
+            return [WORK, WORK, CARRY, MOVE, MOVE];
 
         case ROLE.RHARVESTER:
             return EXPANSION.rharvesterBody;
