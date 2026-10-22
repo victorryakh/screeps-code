@@ -43,6 +43,8 @@ declare global {
         repairing?: boolean;
         /** Тик спавна крипа; используется `metrics.recordCreepDeath` для оценки возраста. */
         _birthTick?: number;
+        /** Счётчик тиков, проведённых крипом в целевой комнате (см. `roles/claimer.ts`). */
+        _targetTicks?: number;
         /**
          * Кэш маршрута, используемый {@link moveCached} для экономии CPU.
          * Содержит путь, конечную точку и момент последнего вычисления; при
@@ -63,6 +65,8 @@ declare global {
     interface RoomMemory {
         /** Тик последней проверки необходимости новых extensions (см. `ensureExtensions`). */
         _extensionCheckTick?: number;
+        /** Тик последней проверки необходимости construction site для спавна (см. `ensureSpawn`). */
+        _spawnCheckTick?: number;
         /** Тик, на котором был создан последний крип; используется как однотиковый кулдаун спавна. */
         _spawnCooldown?: number;
         /** Счётчик чередования источников между харвестерами для равномерной нагрузки. */
@@ -106,6 +110,12 @@ declare global {
         debug?: boolean;
         /** Текущий уровень логгирования, читается {@link getLevel}. */
         logLevel?: LogLevel;
+        /**
+         * Id спавнов, которые бот видел хотя бы раз. Используется для
+         * восстановления доступа к комнате через `Game.getObjectById`, когда
+         * vision временно отсутствует (см. `main.ts`).
+         */
+        _knownSpawnIds?: Record<string, true>;
         /**
          * Кэш `Game.map.describeExits` на тик последнего обновления.
          * Используется `pickExpansionTarget`; TTL — `EXITS_CACHE_TTL` тиков.
