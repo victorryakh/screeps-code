@@ -37,6 +37,17 @@ export function run(creep: Creep): void {
         return;
     }
 
+    // Комната уже захвачена другим игроком — резервировать в ней больше
+    // нечего, крип только зря занимает слот и держит ресёрв зоны.
+    if (!!controller.owner && !controller.my) {
+        if (Memory.targetRoom === creep.memory.targetRoom) {
+            delete Memory.targetRoom;
+        }
+
+        creep.suicide();
+        return;
+    }
+
     if (creep.reserveController(controller) === ERR_NOT_IN_RANGE) {
         moveCached(creep, controller, { reusePath: REMOTE_PATH_TTL });
     }

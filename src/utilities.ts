@@ -61,7 +61,9 @@ export function moveCached(
     }
 
     if (opts.reusePath === undefined) {
-        opts.reusePath = HOME_PATH_TTL;
+        // Копия, а не мутация аргумента: иначе `reusePath` залипает в
+        // вызывающем коде и «заражает» следующие вызовы с тем же объектом.
+        opts = { ...opts, reusePath: HOME_PATH_TTL };
     }
 
     return creep.moveTo(dest, opts);

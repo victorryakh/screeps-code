@@ -107,7 +107,15 @@ export function planSpawnOrder(
     // появится хотя бы один. Как только harvester >= 1, возвращаемся
     // к обычному порядку (upgrader → harvester → ...).
     const harvesterCount = counts[ROLE.HARVESTER] || 0;
-    const needsHarvesterFirst = !canUpgrade && harvesterCount < 1;
+
+    // Харвестер идёт первым всегда, пока их нет. Тело upgrader-а стоит
+    // дороже (300 энергии против 200) и он НЕ возвращает энергию в спавн —
+    // он сливает её в контроллер. Если потратить последнюю энергию комнаты
+    // на upgrader-а, колония замрёт: добывать энергию будет некому, а
+    // энергия в спавне не восполнится. Спавн-скептр комнаты на RCL 1
+    // равен 300 — ровно стоимость upgrader-а, то есть без этого правила
+    // свежая комната встаёт насмерть после первого же спавна.
+    const needsHarvesterFirst = harvesterCount < 1;
 
     if (needsHarvesterFirst) {
         return [

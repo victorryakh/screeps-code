@@ -6,8 +6,9 @@
  * Также маршрутизирует выполнение ролей через {@link runCreep}.
  * ==========================================================================*/
 
-import { ROLE } from './constants';
+import { ROLE, WALL_TERRAIN, EXTENSION_CHECK_INTERVAL } from './constants';
 import { trySpawn } from './spawn';
+import * as log from './log';
 import * as harvester from './roles/harvester';
 import * as upgrader from './roles/upgrader';
 import * as builder from './roles/builder';
@@ -67,6 +68,8 @@ export function run(room: Room): void {
         ensureExtensions(room, layout);
     }
 
+    ensureSpawn(room);
+
     const defense = planDefense(room);
     if (defense.enabled) {
         runTowers(room, defense);
@@ -79,8 +82,15 @@ export function run(room: Room): void {
         const targetCount = pair[1];
 
         if ((counts[role] || 0) < targetCount) {
-            trySpawn(room, role);
-            break;
+            if (trySpawn(room, role)) {
+                // Не больше одного крипа за тик.
+                break;
+            }
+
+            // Спавн не удался (не хватило энергии, нет свободного спавна) —
+            // пробуем следующую роль в списке: она может быть дешевле.
+            // Раньше здесь был безусловный `break`, из-за чего более дорогая
+            // первая роль блокировала спавн дешёвой второй.
         }
     }
 
@@ -123,6 +133,101 @@ function runCreep(creep: Creep): void {
 
         default:
             return;
+    }
+}
+
+/**
+ * Проверяет, что в owned-комнате есть спавн, и при необходимости планирует
+ * construction site для `STRUCTURE_SPAWN`.
+ *
+ * @remarks
+ * Без спавна комната не может породить ни одного крипа: `trySpawn` не
+ * находит `FIND_MY_SPAWNS` и молча выходит. Раньше бот умел планировать
+ * только extensions (`ensureExtensions`), поэтому не мог ни восстановить
+ * уничтоженный спавн, ни развернуться в захваченной комнате. Молчание
+ * особенно опасно: колония выглядит живой (тики идут, ошибок нет), но
+ * не делает ничего — поэтому здесь же выдаётся явное предупреждение.
+ *
+ * Место для спавна выбирается кольцами вокруг контроллера (радиус 1..3):
+ * так спавн оказывается рядом с контроллером и в зоне крипов.
+ *
+ * @param room Комната, которой мы владеем.
+ */
+function ensureSpawn(room: Room): void {
+    if (
+        room.memory._spawnCheckTick &&
+        Game.time - room.memory._spawnCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._spawnCheckTick = Game.time;
+
+    const hasSpawn = room.find(FIND_MY_SPAWNS).length > 0;
+
+    const hasSpawnSite = room.find(FIND_MY_CONSTRUCTION_SITES, {
+        filter: (s) => s.structureType === STRUCTURE_SPAWN
+    }).length > 0;
+
+    if (hasSpawn || hasSpawnSite) {
+        return;
+    }
+
+    log.warn(
+        'room',
+        `owned room ${room.name} has no spawn — the colony cannot spawn creeps; ` +
+        'build a spawn or respawn'
+    );
+
+    const controller = room.controller;
+
+    if (!controller) {
+        return;
+    }
+
+    const occupied = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const s of room.find(FIND_CONSTRUCTION_SITES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const c of room.find(FIND_CREEPS)) {
+        occupied.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    const terrain = room.getTerrain();
+
+    for (let radius = 1; radius <= 3; radius++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+            for (let dy = -radius; dy <= radius; dy++) {
+                if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) {
+                    continue;
+                }
+
+                const x = controller.pos.x + dx;
+                const y = controller.pos.y + dy;
+
+                if (x < 1 || x > 48 || y < 1 || y > 48) {
+                    continue;
+                }
+
+                if (terrain.get(x, y) === WALL_TERRAIN) {
+                    continue;
+                }
+
+                if (occupied.has(`${x},${y}`)) {
+                    continue;
+                }
+
+                if (room.createConstructionSite(x, y, STRUCTURE_SPAWN) === OK) {
+                    return;
+                }
+            }
+        }
     }
 }
 
