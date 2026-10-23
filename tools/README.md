@@ -72,8 +72,13 @@ SCREEPS_TOKEN=<токен> node tools/screeps-watchdog.mjs --json   # машин
 
 ### GitHub Actions
 
-В репозитории есть `.github/workflows/screeps-watchdog.yml`: он запускает
-сторож каждые 3 часа. Токен нужно положить в секрет репозитория:
+Готовый workflow лежит в [`tools/screeps-watchdog.workflow.yml`](./screeps-watchdog.workflow.yml).
+Файл нужно скопировать в `.github/workflows/screeps-watchdog.yml` — это
+единственный шаг, который нельзя сделать автоматически: изменение файлов в
+`.github/workflows/` требует токен со scope `workflow` (у fine-grained PAT его
+обычно нет).
+
+После копирования добавьте токен в секрет репозитория:
 
 **Settings → Secrets and variables → Actions → New repository secret →
 `SCREEPS_TOKEN`**
