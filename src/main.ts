@@ -12,6 +12,10 @@ import * as expansion from './expansion';
 import * as metrics from './metrics';
 import * as pixels from './utils/pixels';
 import * as log from './log';
+import * as claimer from './roles/claimer';
+import { ROLE } from './constants';
+import { EXPANSION } from './strategy';
+import { bodyCost } from './utilities';
 
 console.log("Started script at", new Date().toISOString())
 
@@ -152,6 +156,26 @@ export function loop(): void {
         }
     }
 
+    // Vision есть, но owned-комнат может не быть. Тогда у нас наверняка
+    // остался свой спавн в комнате, контроллер которой больше не наш
+    // (например, он даунгрейднулся до уровня 0). Такой спавн — последняя
+    // точка опоры: если контроллер свободен (уровень 0, без владельца и без
+    // резервации), из спавна можно завести CLAIM-крипа и вернуть комнату.
+    // Без этого аккаунт остаётся без комнаты и без крипов, и движок Screeps
+    // перестаёт запускать скрипт вовсе (см. STRATEGY.md, раздел «Простой
+    // аккаунта без комнат»).
+    const reclaiming = tryReclaimRoom();
+
+    if (ownedRoomNames.length === 0 && !reclaiming) {
+        log.warn('main', 'no owned rooms — bot is idle, respawn or claim a new room to recover');
+        metrics.tickEnd();
+        return;
+    }
+
+    // Клэймер живёт в комнате, которая ещё не наша, поэтому `room.run()`
+    // его не выполняет — делаем это здесь.
+    runReclaimClaimers();
+
     // Регистрируем id всех спавнов наших owned-комнат, чтобы в будущем
     // (после потери vision) можно было воскресить доступ через
     // `Game.getObjectById` (см. блок выше).
@@ -167,17 +191,30 @@ export function loop(): void {
             Memory._knownSpawnIds[spawn.id] = true;
         }
     }
-    // Чистим записи о спавнах, которые больше не наши (controller.my === false
-    // или комната потеряна). Без чистки `_knownSpawnIds` будет расти вечно.
+    // Чистим записи о спавнах, из которых восстановление уже невозможно:
+    // в комнате нет контроллера либо контроллер занят (наш контроллер
+    // даунгрейднулся не до нуля, либо комнату перехватили). Спавны в комнате
+    // со свободным контроллером, наоборот, оставляем: из них бот переклеймит
+    // комнату (см. `tryReclaimRoom`). Раньше очистка удаляла id спавна при
+    // любом `controller.my === false` — то есть ровно тот id, который был
+    // нужен для восстановления.
     for (const spawnId in Memory._knownSpawnIds) {
         const spawn = Game.getObjectById(spawnId as Id<StructureSpawn>);
         if (!spawn) {
             continue;
         }
-        const room = spawn.room;
-        if (room.controller && !room.controller.my) {
+        const controller = spawn.room.controller;
+
+        if (!controller) {
             delete Memory._knownSpawnIds[spawnId];
+            continue;
         }
+
+        if (controller.my || isFreeController(controller)) {
+            continue;
+        }
+
+        delete Memory._knownSpawnIds[spawnId];
     }
 
     for (const roomName of ownedRoomNames) {
@@ -190,4 +227,135 @@ export function loop(): void {
     expansion.run();
     pixels.generatePixel();
     metrics.tickEnd();
+}
+
+/**
+ * Проверяет, что контроллер комнаты можно переклеймить: уровень 0, без
+ * владельца и без резервации.
+ *
+ * @param controller Контроллер комнаты.
+ * @returns `true`, если комната свободна для клейма.
+ */
+function isFreeController(controller: StructureController): boolean {
+    return (
+        controller.level === 0 &&
+        !controller.owner &&
+        !controller.reservation
+    );
+}
+
+/**
+ * Пытается вернуть комнату, в которой у нас остался спавн, но контроллер
+ * больше не наш.
+ *
+ * Сценарий: контроллер нашей комнаты даунгрейднулся до уровня 0 (или был
+ * перехвачен другим игроком). Спавн при этом остаётся нашим, и его ещё
+ * можно использовать: если контроллер свободен, из спавна заводится
+ * CLAIM-крип, который доходит до контроллера и клеймит комнату обратно.
+ *
+ * @remarks
+ * Это единственный путь, который позволяет боту выбраться из состояния
+ * «есть спавн, но нет комнаты» без участия игрока. Работает, только если
+ * в комнате ещё есть крипы (иначе движок Screeps не запустит скрипт —
+ * тогда аккаунт спасает внешний сторож `tools/screeps-watchdog.mjs`).
+ *
+ * @returns `true`, если переклейм уже идёт или только что запущен.
+ */
+function tryReclaimRoom(): boolean {
+    const known = Memory._knownSpawnIds;
+
+    if (!known) {
+        return false;
+    }
+
+    for (const spawnId in known) {
+        const spawn = Game.getObjectById(spawnId as Id<StructureSpawn>);
+
+        if (!spawn) {
+            continue;
+        }
+
+        const targetRoom = spawn.room;
+        const controller = targetRoom.controller;
+
+        if (!controller || controller.my || !isFreeController(controller)) {
+            continue;
+        }
+
+        // Если клэймер к этой комнате уже идёт, нового не заводим.
+        let inFlight = false;
+
+        for (const name in Game.creeps) {
+            const creep = Game.creeps[name];
+
+            if (
+                creep &&
+                creep.memory.role === ROLE.CLAIMER &&
+                creep.memory.targetRoom === targetRoom.name
+            ) {
+                inFlight = true;
+                break;
+            }
+        }
+
+        if (inFlight) {
+            return true;
+        }
+
+        const body = EXPANSION.claimerBody;
+        const name = `${ROLE.CLAIMER}_${Game.time}_${Math.floor(Math.random() * 1000)}`;
+        const result = spawn.spawnCreep(body, name, {
+            memory: {
+                role: ROLE.CLAIMER,
+                homeRoom: targetRoom.name,
+                targetRoom: targetRoom.name
+            }
+        });
+
+        if (result === OK) {
+            metrics.recordSpawn(ROLE.CLAIMER, bodyCost(body), body.length);
+            log.info('main', `reclaiming ${targetRoom.name}: claimer spawned from orphaned spawn`);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Выполняет шаг крипов-клэймеров, которые работают в комнатах, ещё не
+ * принадлежащих нам.
+ *
+ * @remarks
+ * Обычно клэймеров обслуживает `room.run()`, но там перебираются только
+ * owned-комнаты. Пока комната не отклеймана, её нужно вести вручную —
+ * иначе клэймер будет стоять на месте.
+ */
+function runReclaimClaimers(): void {
+    for (const name in Game.creeps) {
+        const creep = Game.creeps[name];
+
+        if (!creep || creep.spawning) {
+            continue;
+        }
+
+        if (creep.memory.role !== ROLE.CLAIMER) {
+            continue;
+        }
+
+        const targetRoom = creep.memory.targetRoom;
+
+        if (!targetRoom) {
+            continue;
+        }
+
+        const room = Game.rooms[targetRoom];
+
+        if (room && room.controller && room.controller.my) {
+            // Комната уже наша — её обработает `room.run()`.
+            continue;
+        }
+
+        claimer.run(creep);
+    }
 }
