@@ -39,3 +39,17 @@ bun run push-main    # build + grunt dist (uploads to screeps.com)
 ## Strategy
 
 The full strategy document lives at `./STRATEGY.md`
+
+## Watchdog
+
+Игровой скрипт в Screeps не запускается, если у аккаунта нет ни комнаты, ни
+крипа. Если аккаунт остался без спавна (`world-status` = `empty`), его может
+вернуть в игру только внешний процесс — `tools/screeps-watchdog.mjs`:
+
+```bash
+SCREEPS_TOKEN=<токен> node tools/screeps-watchdog.mjs
+```
+
+Скрипт без зависимостей, работает и по cron, и в GitHub Actions
+(`.github/workflows/screeps-watchdog.yml`, токен берётся из секрета
+`SCREEPS_TOKEN`). Подробности — в [`tools/README.md`](./tools/README.md).

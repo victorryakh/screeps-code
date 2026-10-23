@@ -1,0 +1,32 @@
+name: Screeps Watchdog
+
+# Скрипт игрока в Screeps не запускается, если у аккаунта нет ни комнаты,
+# ни крипа. Страховкой служит этот внешний процесс: он проверяет world-status
+# и, если аккаунт остался без спавна (world-status = empty), ставит спавн.
+#
+# Подробности: tools/README.md
+
+on:
+  schedule:
+    # каждые 3 часа, с минутным сдвигом, чтобы не попадать в пик
+    - cron: '17 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Проверить и восстановить аккаунт
+        env:
+          SCREEPS_TOKEN: ${{ secrets.SCREEPS_TOKEN }}
+        run: node tools/screeps-watchdog.mjs
