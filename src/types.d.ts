@@ -96,6 +96,13 @@ declare global {
      * `_notified`, `_tickStartCpu`).
      */
     interface Memory {
+        /**
+         * Id спавнов, которые бот видел хотя бы раз. Используется для
+         * восстановления доступа к комнате через `Game.getObjectById`, когда
+         * vision временно отсутствует или контроллер больше не наш
+         * (см. `main.ts`, `tryReclaimRoom`).
+         */
+        _knownSpawnIds?: Record<string, true>;
         /** Имя выбранной целевой комнаты для экспансии; используется ролями `rharvester`/`reserver`/`claimer`. */
         targetRoom?: string;
         /** Чёрный список комнат-кандидатов на экспансию; перекрывает `EXPANSION.blacklist`. */
