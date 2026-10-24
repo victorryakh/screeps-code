@@ -59,12 +59,34 @@ declare global {
     }
 
     /**
+     * Структура в комнате.
+     *
+     * @remarks
+     * Движок Screeps умеет сносить собственные структуры: `Structure.destroy()`
+     * отправляет intent `room/destroyStructure`, который обрабатывается на
+     * сервере (`screeps/engine`, `src/processor/intents/room/destroy-structure.js`).
+     * Метод не документирован в публичном API, поэтому объявлен здесь
+     * опциональным: бот использует его только как крайнюю меру — снести
+     * расширение, если из-за него спавн оказался запечатан.
+     */
+    interface Structure<T extends StructureConstant = StructureConstant> {
+        /** Сносит структуру. Возвращает `OK` или код ошибки. */
+        destroy?(): ScreepsReturnCode;
+    }
+
+    /**
      * Память комнаты. Содержит как пользовательские данные (метрики),
      * так и служебный кэш/таймеры, помеченные `_`-префиксом.
      */
     interface RoomMemory {
         /** Тик последней проверки необходимости новых extensions (см. `ensureExtensions`). */
         _extensionCheckTick?: number;
+        /** Тик последней проверки доступности спавна для появления крипов (см. `ensureSpawnAccessible`). */
+        _spawnAccessCheckTick?: number;
+        /** Тик, с которого спавн считается запечатанным; сбрасывается, как только свободная клетка появилась. */
+        _sealedSpawnTick?: number;
+        /** Тик последней попытки освободить клетку у запечатанного спавна (см. `ensureSpawnAccessible`). */
+        _sealedSpawnHealTick?: number;
         /** Тик последней проверки необходимости construction site для спавна (см. `ensureSpawn`). */
         _spawnCheckTick?: number;
         /** Тик, на котором был создан последний крип; используется как однотиковый кулдаун спавна. */

@@ -81,3 +81,74 @@ export const EXTENSION_CHECK_INTERVAL = 10;
  * числовой литерал `1`, совпадающий со значением константы в рантайме Screeps.
  */
 export const WALL_TERRAIN: TERRAIN_MASK_WALL = (typeof TERRAIN_MASK_WALL !== 'undefined') ? TERRAIN_MASK_WALL : 1;
+
+/**
+ * Радиус (в клетках) вокруг спавна, который должен оставаться свободным
+ * от расширений и их construction sites.
+ *
+ * @remarks
+ * Движок Screeps создаёт нового крипа на одной из восьми клеток, соседних
+ * со спавном (`screeps/engine`, `src/processor/intents/spawns/_born-creep.js`).
+ * Если все соседние клетки заняты (extension, construction site, стена
+ * рельефа), движок не может разместить крипа и бесконечно откладывает его
+ * появление: спавн остаётся занятым, колония не способна завести ни одного
+ * крипа и умирает молча — тики идут, CPU расходуется, но ничего не
+ * происходит. Поэтому кольцо радиуса 1 вокруг спавна нельзя занимать.
+ */
+export const SPAWN_CLEAR_RADIUS = 1;
+
+/**
+ * Типы структур, которые занимают клетку целиком и не дают движку поставить
+ * рядом со спавном нового крипа.
+ *
+ * @remarks
+ * Список повторяет `OBSTACLE_OBJECT_TYPES` движка Screeps, из которого
+ * `_born-creep.js` берёт препятствия: спавн, extension, link, storage,
+ * tower, observer, powerSpawn, powerBank, lab, terminal, nuker, factory,
+ * invaderCore, constructedWall и controller. Рампарты, контейнеры, дороги и
+ * extraction points в список не входят — по ним крип пройти может.
+ */
+export const BIRTH_BLOCKING_TYPES: StructureConstant[] = [
+    STRUCTURE_SPAWN,
+    STRUCTURE_EXTENSION,
+    STRUCTURE_LINK,
+    STRUCTURE_STORAGE,
+    STRUCTURE_TOWER,
+    STRUCTURE_OBSERVER,
+    STRUCTURE_POWER_SPAWN,
+    STRUCTURE_POWER_BANK,
+    STRUCTURE_LAB,
+    STRUCTURE_TERMINAL,
+    STRUCTURE_NUKER,
+    STRUCTURE_FACTORY,
+    STRUCTURE_INVADER_CORE,
+    STRUCTURE_WALL,
+    STRUCTURE_CONTROLLER
+];
+
+/**
+ * Сколько тиков спавн должен оставаться запечатанным, прежде чем бот
+ * попытается освободить клетку, снеся соседнее расширение.
+ *
+ * @remarks
+ * Пауза нужна, чтобы не реагировать на кратковременные состояния: движок
+ * может прямо сейчас удалять структуру, и счётчик свободных клеток
+ * обновится на следующем тике. Проверка идёт раз в
+ * `EXTENSION_CHECK_INTERVAL` (10 тиков), поэтому 30 тиков — это три
+ * последовательные проверки. Крипов проверка не учитывает: они подвижны,
+ * и их присутствие движок отслеживает отдельно.
+ */
+export const SEALED_SPAWN_HEAL_DELAY = 30;
+
+/**
+ * Минимальный интервал (в тиках) между попытками освободить клетку у
+ * запечатанного спавна.
+ *
+ * @remarks
+ * Страховка от повреждения: если снос расширения не дал эффекта (движок
+ * отказал), бот не должен сносить следующее расширение на каждом
+ * `SEALED_SPAWN_HEAL_DELAY` тиков. За одну серию запечатывания сносится не
+ * более одного расширения, а следующая попытка возможна не раньше, чем
+ * через этот интервал.
+ */
+export const SEALED_SPAWN_HEAL_RETRY = 1000;
