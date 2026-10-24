@@ -98,7 +98,7 @@
 - Проверяется раз в `EXTENSION_CHECK_INTERVAL` (10 тиков) через `room.memory._spawnAccessCheckTick`.
 - Для каждого спавна считаются свободные соседние клетки (`countFreeBirthTiles` в `src/utilities.ts`) по правилам движка: клетка занята, если на ней стоит structure или construction site из списка `BIRTH_BLOCKING_TYPES` (спавн, extension, link, storage, tower, observer, powerSpawn, powerBank, lab, terminal, nuker, factory, invaderCore, constructedWall, controller), а также source/mineral/deposit, либо это стена рельефа без дороги.
 - Если свободных клеток нет — спавн считается **запечатанным**: бот пишет предупреждение (`Game.notify`, с дедупликацией через `log.notifyOnce`) и запоминает момент в `room.memory._sealedSpawnTick`.
-- Если спавн запечатан дольше `SEALED_SPAWN_HEAL_DELAY` (100 тиков), бот сносит одно соседнее расширение (`Structure.destroy()`), освобождая клетку. Снести construction site в штатном API нельзя, а расширение — единственное, что бот может убрать сам.
+- Если спавн запечатан дольше `SEALED_SPAWN_HEAL_DELAY` (30 тиков), бот сносит одно соседнее расширение (`Structure.destroy()`), освобождая клетку. Снести construction site в штатном API нельзя, а расширение — единственное, что бот может убрать сам.
 - Расширения энергетически работают в любой точке комнаты (`room.energyAvailable` суммирует все extensions), поэтому потерянное расширение бот построит заново на кольце 2 и выше.
 
 ## Оборона
