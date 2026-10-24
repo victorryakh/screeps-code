@@ -6,8 +6,15 @@
  * Также маршрутизирует выполнение ролей через {@link runCreep}.
  * ==========================================================================*/
 
-import { ROLE, WALL_TERRAIN, EXTENSION_CHECK_INTERVAL } from './constants';
+import {
+    ROLE,
+    WALL_TERRAIN,
+    EXTENSION_CHECK_INTERVAL,
+    SPAWN_CLEAR_RADIUS,
+    SEALED_SPAWN_HEAL_DELAY
+} from './constants';
 import { trySpawn } from './spawn';
+import { countFreeBirthTiles } from './utilities';
 import * as log from './log';
 import * as harvester from './roles/harvester';
 import * as upgrader from './roles/upgrader';
@@ -69,6 +76,7 @@ export function run(room: Room): void {
     }
 
     ensureSpawn(room);
+    ensureSpawnAccessible(room);
 
     const defense = planDefense(room);
     if (defense.enabled) {
@@ -236,8 +244,11 @@ function ensureSpawn(room: Room): void {
  * спавна. Алгоритм:
  * - Вызывается не чаще, чем раз в `layout.checkInterval` тиков
  *   (через `room.memory._extensionCheckTick`).
- * - Сканируются кольца от спавна с радиусом `1..layout.planRadius`,
- *   берутся только граничные клетки `max(|dx|,|dy|) === radius`.
+ * - Сканируются кольца от спавна с радиусом
+ *   `SPAWN_CLEAR_RADIUS + 1..layout.planRadius`, берутся только граничные
+ *   клетки `max(|dx|,|dy|) === radius`. Кольцо радиуса 1 не занимается:
+ *   движок создаёт крипа на соседней клетке, и занятое кольцо делает спавн
+ *   неработоспособным.
  * - Пропускаются стены (`terrain.get === layout.wallTerrain`) и клетки
  *   за пределами `[1,48]`.
  * - Внутри кольца клетки сортируются по числу смежных существующих
@@ -308,7 +319,10 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
 
     const candidates: { x: number; y: number }[] = [];
 
-    for (let radius = 1; radius <= layout.planRadius; radius++) {
+    // Кольцо радиуса 1 вокруг спавна пропускается: движок ставит нового
+    // крипа на одну из восьми соседних клеток, и если все они заняты,
+    // спавн навсегда остаётся занятым (см. ensureSpawnAccessible).
+    for (let radius = SPAWN_CLEAR_RADIUS + 1; radius <= layout.planRadius; radius++) {
         const ring: { x: number; y: number }[] = [];
 
         for (let dx = -radius; dx <= radius; dx++) {
@@ -407,6 +421,87 @@ function runTowers(room: Room, defense: { attackHostiles: boolean; healInjured: 
                 tower.heal(target);
                 continue;
             }
+        }
+    }
+}
+
+/**
+ * Проверяет, что у спавна есть свободная соседняя клетка, в которую движок
+ * сможет поставить нового крипа, и при необходимости освобождает её.
+ *
+ * @remarks
+ * Новый крип появляется на одной из восьми клеток, соседних со спавном
+ * (`screeps/engine`, `src/processor/intents/spawns/_born-creep.js`). Если все
+ * они заняты — расширениями, их construction sites, стеной рельефа, —
+ * движок не может разместить крипа и бесконечно откладывает его появление:
+ * спавн остаётся занятым, `trySpawn` не находит свободного спавна, и
+ * колония умирает молча (тики идут, CPU расходуется, но ничего не
+ * происходит).
+ *
+ * Проверка идёт раз в {@link EXTENSION_CHECK_INTERVAL} тиков. Если спавн
+ * запечатан дольше {@link SEALED_SPAWN_HEAL_DELAY} тиков, бот сносит одно
+ * соседнее расширение, освобождая клетку: восстановить спавн иначе нечем —
+ * construction sites в штатном API отменить нельзя, а структуры сносить
+ * больше нечем.
+ *
+ * @param room Комната, которой мы владеем.
+ */
+function ensureSpawnAccessible(room: Room): void {
+    if (
+        room.memory._spawnAccessCheckTick &&
+        Game.time - room.memory._spawnAccessCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._spawnAccessCheckTick = Game.time;
+
+    for (const spawn of room.find(FIND_MY_SPAWNS)) {
+        if (countFreeBirthTiles(room, spawn) > 0) {
+            delete room.memory._sealedSpawnTick;
+            continue;
+        }
+
+        const sealedSince = room.memory._sealedSpawnTick;
+
+        if (!sealedSince) {
+            room.memory._sealedSpawnTick = Game.time;
+            log.warn(
+                'room',
+                `spawn ${spawn.name} in ${room.name} is sealed — the engine cannot place ` +
+                'new creeps, the colony is idle. The bot will free a cell shortly.'
+            );
+            continue;
+        }
+
+        if (Game.time - sealedSince < SEALED_SPAWN_HEAL_DELAY) {
+            continue;
+        }
+
+        const blocked = room.find(FIND_MY_STRUCTURES, {
+            filter: (s) =>
+                s.structureType === STRUCTURE_EXTENSION &&
+                Math.max(
+                    Math.abs(s.pos.x - spawn.pos.x),
+                    Math.abs(s.pos.y - spawn.pos.y)
+                ) === 1
+        });
+
+        const target = blocked[0];
+
+        if (!target || typeof target.destroy !== 'function') {
+            continue;
+        }
+
+        const result = target.destroy();
+
+        if (result === OK) {
+            room.memory._sealedSpawnTick = Game.time;
+            log.warn(
+                'room',
+                `destroyed extension at ${target.pos.x},${target.pos.y} to unseal spawn ` +
+                `${spawn.name} in ${room.name}`
+            );
         }
     }
 }
