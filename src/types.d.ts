@@ -85,6 +85,8 @@ declare global {
         _spawnAccessCheckTick?: number;
         /** Тик, с которого спавн считается запечатанным; сбрасывается, как только свободная клетка появилась. */
         _sealedSpawnTick?: number;
+        /** Тик последней попытки освободить клетку у запечатанного спавна (см. `ensureSpawnAccessible`). */
+        _sealedSpawnHealTick?: number;
         /** Тик последней проверки необходимости construction site для спавна (см. `ensureSpawn`). */
         _spawnCheckTick?: number;
         /** Тик, на котором был создан последний крип; используется как однотиковый кулдаун спавна. */
