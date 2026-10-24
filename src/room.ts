@@ -11,7 +11,8 @@ import {
     WALL_TERRAIN,
     EXTENSION_CHECK_INTERVAL,
     SPAWN_CLEAR_RADIUS,
-    SEALED_SPAWN_HEAL_DELAY
+    SEALED_SPAWN_HEAL_DELAY,
+    SEALED_SPAWN_HEAL_RETRY
 } from './constants';
 import { trySpawn } from './spawn';
 import { countFreeBirthTiles } from './utilities';
@@ -459,6 +460,7 @@ function ensureSpawnAccessible(room: Room): void {
     for (const spawn of room.find(FIND_MY_SPAWNS)) {
         if (countFreeBirthTiles(room, spawn) > 0) {
             delete room.memory._sealedSpawnTick;
+            delete room.memory._sealedSpawnHealTick;
             continue;
         }
 
@@ -475,6 +477,14 @@ function ensureSpawnAccessible(room: Room): void {
         }
 
         if (Game.time - sealedSince < SEALED_SPAWN_HEAL_DELAY) {
+            continue;
+        }
+
+        // Не чаще, чем раз в SEALED_SPAWN_HEAL_RETRY тиков: если снос
+        // расширения не помог, следующее расширение трогать нельзя.
+        const lastHeal = room.memory._sealedSpawnHealTick;
+
+        if (lastHeal !== undefined && Game.time - lastHeal < SEALED_SPAWN_HEAL_RETRY) {
             continue;
         }
 
@@ -497,6 +507,7 @@ function ensureSpawnAccessible(room: Room): void {
 
         if (result === OK) {
             room.memory._sealedSpawnTick = Game.time;
+            room.memory._sealedSpawnHealTick = Game.time;
             log.warn(
                 'room',
                 `destroyed extension at ${target.pos.x},${target.pos.y} to unseal spawn ` +
