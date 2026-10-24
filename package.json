@@ -6,7 +6,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "build": "bun build src/main.ts --outdir dist --target=node --format=cjs",
-    "push-main": "bun run lint && bun run build && grunt screeps"
+    "push-main": "bun run lint && bun run build && grunt screeps",
+    "smoke": "bun run build && node tools/smoke-spawn-access.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
