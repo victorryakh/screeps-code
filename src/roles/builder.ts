@@ -16,8 +16,43 @@ import {
     findClosestSource,
     findConstructionSite,
     buildAt,
+    blocksBirthRing,
     upgradeRoomController
 } from '../utilities';
+
+/**
+ * Фильтр construction sites: бот не строит расширения в кольце радиуса 1
+ * вокруг спавна.
+ *
+ * @remarks
+ * Такое расширение занимает клетку рождения. Восемь таких клеток вокруг
+ * спавна — и движок больше не может поставить крипа: спавн запечатывается и
+ * колония замирает без ошибок. Строить такое расширение бессмысленно:
+ * `ensureSpawnRingReserve` снесёт его обратно.
+ *
+ * @param site  Construction site.
+ */
+function isBuildable(site: ConstructionSite): boolean {
+    if (site.structureType === STRUCTURE_ROAD) {
+        return false;
+    }
+
+    if (site.progress >= site.progressTotal) {
+        return false;
+    }
+
+    const room = site.room;
+
+    if (
+        room &&
+        site.structureType === STRUCTURE_EXTENSION &&
+        blocksBirthRing(room, site.pos.x, site.pos.y)
+    ) {
+        return false;
+    }
+
+    return true;
+}
 
 /**
  * Выполняет один шаг builder-а. См. описание модуля.
@@ -43,13 +78,7 @@ export function run(creep: Creep): void {
     }
 
     if (creep.memory.building) {
-        let site = findConstructionSite(creep, (s) =>
-            s.structureType !== STRUCTURE_ROAD && s.progress < s.progressTotal
-        );
-
-        if (!site) {
-            site = findConstructionSite(creep);
-        }
+        const site = findConstructionSite(creep, isBuildable);
 
         if (site) {
             buildAt(creep, site, {
