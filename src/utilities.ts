@@ -126,6 +126,14 @@ export function bodyFor(role: string): BodyPartConstant[] {
  * Добывает ресурс из источника. Если крип не в зоне действия — перемещается
  * к нему через {@link moveCached}.
  *
+ * @remarks
+ * Если крип вне зоны действия, целью движения становится не сам источник, а
+ * свободная клетка рядом с ним: на клетку источника крип встать не может
+ * (источник — препятствие, а в «кармане» из стен он ещё и лежит на стене,
+ * так что пути к нему не существует вовсе). Такой подход не даёт крипу
+ * замереть на подходе к источнику — а замерший крип на клетке рождения
+ * закрывает спавн.
+ *
  * @param creep  Добывающий крип.
  * @param source Источник (`Source`, `Mineral`, `Deposit`). `null`/`undefined`
  *               считается ошибкой и возвращает `ERR_INVALID_TARGET`.
@@ -143,10 +151,43 @@ export function harvestEnergy(
     }
 
     if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        return moveCached(creep, source, opts);
+        const tiles = findHarvestTiles(creep, source);
+        const moveOpts = withCreepsIgnored(opts);
+
+        for (const tile of tiles) {
+            const result = moveCached(creep, tile, moveOpts);
+
+            if (result === OK || result === ERR_TIRED) {
+                return result;
+            }
+        }
+
+        // Ни одна соседняя клетка не подошла — пробуем цель напрямую.
+        return moveCached(creep, source, moveOpts);
     }
 
     return OK;
+}
+
+/**
+ * Дополняет опции перемещения правилом «крипов не считать препятствием».
+ *
+ * @remarks
+ * По умолчанию поиск пути считает других крипов препятствиями, и в тесной
+ * комнате (узкий проход к источнику, кольцо вокруг спавна) путь не
+ * находится вовсе: крип стоит и не работает. Для экономики это хуже, чем
+ * риск пройти рядом с другим крипом.
+ *
+ * @param opts Исходные опции.
+ */
+function withCreepsIgnored(opts?: MoveToOpts): MoveToOpts {
+    const merged: MoveToOpts = { ...(opts ?? {}) };
+
+    if (!merged.ignore) {
+        merged.ignore = [FIND_CREEPS];
+    }
+
+    return merged;
 }
 
 /**
@@ -181,7 +222,7 @@ export function transferEnergy(
     }
 
     if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-        return moveCached(creep, target, opts);
+        return moveCached(creep, target, withCreepsIgnored(opts));
     }
 
     return OK;
@@ -337,10 +378,20 @@ export function repairAt(
  * Список препятствий повторяет `OBSTACLE_OBJECT_TYPES` движка
  * (`screeps/engine`, `src/processor/intents/spawns/_born-creep.js`):
  * structures и construction sites из {@link BIRTH_BLOCKING_TYPES}, а также
- * source/mineral/deposit. Крипы в список не входят: они подвижны, и их
- * присутствие движок учитывает отдельно.
+ * source/mineral/deposit.
+ *
+ * Крипы учитываются только при `includeCreeps === true`. Движок считает
+ * крипа препятствием (`OBSTACLE_OBJECT_TYPES` включает `creep`), поэтому
+ * стоящий крип закрывает клетку рождения ровно так же, как расширение.
+ * Раньше бот крипов игнорировал — и из-за этого не видел запечатанный
+ * спавн: кольцо вокруг спавна было занято пятью расширениями, одно из них
+ * бот снёс, и на освободившуюся клетку родился крип, который там и замер.
+ * Спавн перестал работать, а бот считал, что всё в порядке.
+ *
+ * @param room          Комната.
+ * @param includeCreeps Учитывать ли крипов как препятствия.
  */
-function collectBirthBlockingTiles(room: Room): Set<string> {
+function collectBirthBlockingTiles(room: Room, includeCreeps: boolean): Set<string> {
     const blocked = new Set<string>();
 
     for (const s of room.find(FIND_STRUCTURES)) {
@@ -365,6 +416,12 @@ function collectBirthBlockingTiles(room: Room): Set<string> {
 
     for (const d of room.find(FIND_DEPOSITS)) {
         blocked.add(`${d.pos.x},${d.pos.y}`);
+    }
+
+    if (includeCreeps) {
+        for (const c of room.find(FIND_CREEPS)) {
+            blocked.add(`${c.pos.x},${c.pos.y}`);
+        }
     }
 
     return blocked;
@@ -396,11 +453,20 @@ function hasRoadAt(room: Room, x: number, y: number): boolean {
  * крипа. Поэтому количество свободных клеток — это не «эстетика», а
  * условие жизни колонии.
  *
- * @param spawn Спавн, окрестность которого проверяется.
+ * По умолчанию крипы считаются препятствиями: движок не поставит крипа на
+ * клетку, занятую другим крипом. `includeCreeps = false` даёт «структурное»
+ * число свободных клеток — без учёта подвижных крипов.
+ *
+ * @param spawn         Спавн, окрестность которого проверяется.
+ * @param includeCreeps Учитывать ли крипов, занявших клетки.
  * @returns Количество клеток, пригодных для появления крипа (0..8).
  */
-export function countFreeBirthTiles(room: Room, spawn: StructureSpawn): number {
-    const blocked = collectBirthBlockingTiles(room);
+export function countFreeBirthTiles(
+    room: Room,
+    spawn: StructureSpawn,
+    includeCreeps = true
+): number {
+    const blocked = collectBirthBlockingTiles(room, includeCreeps);
     const terrain = room.getTerrain();
     let free = 0;
 
@@ -430,4 +496,279 @@ export function countFreeBirthTiles(room: Room, spawn: StructureSpawn): number {
     }
 
     return free;
+}
+
+/**
+ * Снимок состояния кольца клеток рождения вокруг спавна.
+ */
+export interface SpawnRingInfo {
+    /** Все восемь клеток рождения (те, что не отсеяны стенами рельефа). */
+    birthTiles: { x: number; y: number }[];
+    /** Клетки, в которые движок может поставить крипа прямо сейчас. */
+    freeTiles: { x: number; y: number }[];
+    /** Сколько клеток свободно, если не учитывать крипов. */
+    freeTilesWithoutCreeps: number;
+    /** Наши крипы, стоящие на клетках рождения. */
+    creepsOnBirthTiles: Creep[];
+    /** Расширения в кольце радиуса 1 вокруг спавна. */
+    adjacentExtensions: StructureExtension[];
+}
+
+/**
+ * Собирает состояние кольца клеток рождения вокруг спавна.
+ *
+ * @remarks
+ * Кольцо — это восемь соседних клеток: движок ставит там новорождённого
+ * крипа. Каждая клетка может быть занята структурой, construction site,
+ * источником, стеной рельефа или крипом — и тогда она не годится.
+ *
+ * Функция отдаёт обе точки зрения: с учётом крипов (как считает движок) и
+ * без них (структурная). Разница между ними показывает, кто именно мешает:
+ * если структурно клетки есть, а с крипами нет — мешают наши собственные
+ * крипы, и лечить надо их, а не ломать постройки.
+ *
+ * @param room  Комната.
+ * @param spawn Спавн.
+ */
+export function inspectSpawnRing(room: Room, spawn: StructureSpawn): SpawnRingInfo {
+    const blockedWithCreeps = collectBirthBlockingTiles(room, true);
+    const blockedWithoutCreeps = collectBirthBlockingTiles(room, false);
+    const terrain = room.getTerrain();
+
+    const freeTiles: { x: number; y: number }[] = [];
+    const birthTileList: { x: number; y: number }[] = [];
+    const birthTiles = new Set<string>();
+    let freeTilesWithoutCreeps = 0;
+
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            if (dx === 0 && dy === 0) {
+                continue;
+            }
+
+            const x = spawn.pos.x + dx;
+            const y = spawn.pos.y + dy;
+
+            if (x < 1 || x > 48 || y < 1 || y > 48) {
+                continue;
+            }
+
+            if (terrain.get(x, y) === WALL_TERRAIN && !hasRoadAt(room, x, y)) {
+                continue;
+            }
+
+            birthTiles.add(`${x},${y}`);
+            birthTileList.push({ x, y });
+
+            if (!blockedWithoutCreeps.has(`${x},${y}`)) {
+                freeTilesWithoutCreeps++;
+            }
+
+            if (!blockedWithCreeps.has(`${x},${y}`)) {
+                freeTiles.push({ x, y });
+            }
+        }
+    }
+
+    const creepsOnBirthTiles = room.find(FIND_MY_CREEPS, {
+        filter: (c) => birthTiles.has(`${c.pos.x},${c.pos.y}`)
+    });
+
+    const adjacentExtensions: StructureExtension[] = [];
+
+    for (const s of room.find(FIND_MY_STRUCTURES)) {
+        if (s.structureType !== STRUCTURE_EXTENSION) {
+            continue;
+        }
+
+        if (
+            Math.max(
+                Math.abs(s.pos.x - spawn.pos.x),
+                Math.abs(s.pos.y - spawn.pos.y)
+            ) !== 1
+        ) {
+            continue;
+        }
+
+        adjacentExtensions.push(s);
+    }
+
+    return {
+        birthTiles: birthTileList,
+        freeTiles,
+        freeTilesWithoutCreeps,
+        creepsOnBirthTiles,
+        adjacentExtensions
+    };
+}
+
+/**
+ * Ищет ближайшую к точке свободную клетку, куда можно встать.
+ *
+ * @remarks
+ * Клетка считается пригодной, если это не стена рельефа, на ней нет
+ * препятствующей структуры и нет другого крипа. Клетки из `exclude`
+ * (например, клетки рождения рядом со спавном) пропускаются.
+ *
+ * @param room    Комната.
+ * @param pos     Точка, от которой ищем.
+ * @param exclude Клетки, которые нельзя занимать (в формате `x,y`).
+ * @param radius  Максимальный радиус поиска.
+ */
+export function findFreeTileNear(
+    room: Room,
+    pos: RoomPosition,
+    exclude: Set<string>,
+    radius = 3
+): RoomPosition | null {
+    const terrain = room.getTerrain();
+
+    const occupied = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        if (BIRTH_BLOCKING_TYPES.indexOf(s.structureType) !== -1) {
+            occupied.add(`${s.pos.x},${s.pos.y}`);
+        }
+    }
+
+    for (const c of room.find(FIND_CREEPS)) {
+        occupied.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    let best: RoomPosition | null = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+
+    for (let dx = -radius; dx <= radius; dx++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+            if (dx === 0 && dy === 0) {
+                continue;
+            }
+
+            const x = pos.x + dx;
+            const y = pos.y + dy;
+
+            if (x < 1 || x > 48 || y < 1 || y > 48) {
+                continue;
+            }
+
+            if (terrain.get(x, y) === WALL_TERRAIN) {
+                continue;
+            }
+
+            if (occupied.has(`${x},${y}`) || exclude.has(`${x},${y}`)) {
+                continue;
+            }
+
+            const dist = Math.max(Math.abs(dx), Math.abs(dy));
+
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = new RoomPosition(x, y, room.name);
+            }
+        }
+    }
+
+    return best;
+}
+
+/**
+ * Проверяет, что клетка входит в кольцо рождения (радиус 1) вокруг одного из
+ * наших спавнов.
+ *
+ * @remarks
+ * Расширение (или его construction site) на такой клетке занимает клетку
+ * рождения и приближает спавн к тому состоянию, из которого он не
+ * выходит: все восемь клеток заняты, движок не может поставить крипа.
+ * Поэтому такие расширения бот не строит, а уже построенные — сносит.
+ *
+ * @param room Комната.
+ * @param x    X клетки.
+ * @param y    Y клетки.
+ */
+export function blocksBirthRing(room: Room, x: number, y: number): boolean {
+    for (const spawn of room.find(FIND_MY_SPAWNS)) {
+        if (
+            Math.max(Math.abs(x - spawn.pos.x), Math.abs(y - spawn.pos.y)) === 1
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Ищет клетки рядом с целью, на которые крип может встать и всё равно
+ * достать до цели (радиус действия добычи — 1 клетка).
+ *
+ * @remarks
+ * Нужно потому, что на клетку самого источника крип встать не может:
+ * источник — препятствие для движения (`OBSTACLE_OBJECT_TYPES`), и если он
+ * ещё и лежит на стене рельефа, путь к нему в принципе не существует.
+ * Классический случай: источник в «кармане» из стен, где к нему ведёт
+ * единственный проход, а крип намертво застревает на его подходе, потому
+ * что `moveTo(source)` не находит пути.
+ *
+ * @param creep  Крип, которому нужен подход.
+ * @param target Цель добычи (`Source`, `Mineral`, `Deposit`).
+ * @returns Подходящие клетки, ближайшая к крипу — первой.
+ */
+export function findHarvestTiles(
+    creep: Creep,
+    target: Source | Mineral | Deposit
+): RoomPosition[] {
+    const room = creep.room;
+    const terrain = room.getTerrain();
+
+    const occupied = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        if (BIRTH_BLOCKING_TYPES.indexOf(s.structureType) !== -1) {
+            occupied.add(`${s.pos.x},${s.pos.y}`);
+        }
+    }
+
+    for (const c of room.find(FIND_CREEPS)) {
+        occupied.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    const candidates: RoomPosition[] = [];
+
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            if (dx === 0 && dy === 0) {
+                continue;
+            }
+
+            const x = target.pos.x + dx;
+            const y = target.pos.y + dy;
+
+            if (x < 1 || x > 48 || y < 1 || y > 48) {
+                continue;
+            }
+
+            if (terrain.get(x, y) === WALL_TERRAIN) {
+                continue;
+            }
+
+            if (occupied.has(`${x},${y}`)) {
+                continue;
+            }
+
+            candidates.push(new RoomPosition(x, y, room.name));
+        }
+    }
+
+    candidates.sort((a, b) => {
+        const da = Math.max(Math.abs(a.x - creep.pos.x), Math.abs(a.y - creep.pos.y));
+        const db = Math.max(Math.abs(b.x - creep.pos.x), Math.abs(b.y - creep.pos.y));
+
+        if (da !== db) {
+            return da - db;
+        }
+
+        return a.x + a.y - (b.x + b.y);
+    });
+
+    return candidates;
 }
