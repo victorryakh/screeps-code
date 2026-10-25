@@ -84,10 +84,18 @@ Object.assign(global, C, {
 });
 global.global = global;
 global.console = console;
+global.RoomPosition = class RoomPosition {
+    constructor(x, y, roomName) {
+        this.x = x;
+        this.y = y;
+        this.roomName = roomName;
+    }
+};
 
 const notifications = [];
 const createdSites = [];
 const destroyed = [];
+const movedCreeps = [];
 let tick = 1000;
 
 // ---- fake room -----------------------------------------------------------
@@ -101,10 +109,24 @@ function makeRoom(opts) {
     const extensions = (opts.extensions || []).map(([x, y]) => ({
         structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, hits: 1000, hitsMax: 1000,
         store: { energy: 50 }, room: null,
-        destroy() { destroyed.push([x, y]); return OK; }
+        destroy() {
+            destroyed.push([x, y]);
+            // The engine removes the structure in the same tick.
+            const idx = structures.indexOf(this);
+            if (idx !== -1) structures.splice(idx, 1);
+            return OK;
+        }
     }));
     const sites = (opts.sites || []).map(([x, y]) => ({
-        structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, progress: 0, progressTotal: 3000
+        structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, progress: 0, progressTotal: 3000,
+        room: null
+    }));
+    const creeps = (opts.creeps || []).map(([x, y], i) => ({
+        name: `creep_${i}`, pos: pos(x, y), my: true, hits: 300, hitsMax: 300,
+        fatigue: 0, store: { energy: 0 }, memory: { role: 'harvester', homeRoom: 'E34S53' },
+        room: null,
+        moveTo(target) { movedCreeps.push([x, y, target.x, target.y]); return OK; },
+        moveByPath() { return -4; }
     }));
     const source = { type: 'source', pos: pos(19, 23), energy: 3000, room: null };
 
@@ -129,7 +151,7 @@ function makeRoom(opts) {
             if (type === C.FIND_MY_SPAWNS) list = [spawn];
             else if (type === C.FIND_STRUCTURES || type === C.FIND_MY_STRUCTURES) list = structures;
             else if (type === C.FIND_CONSTRUCTION_SITES || type === C.FIND_MY_CONSTRUCTION_SITES) list = sites;
-            else if (type === C.FIND_CREEPS || type === C.FIND_MY_CREEPS) list = [];
+            else if (type === C.FIND_CREEPS || type === C.FIND_MY_CREEPS) list = creeps;
             else if (type === C.FIND_SOURCES || type === C.FIND_SOURCES_ACTIVE) list = [source];
             else if (type === C.FIND_MINERALS || type === C.FIND_DEPOSITS) list = [];
             else if (type === C.FIND_HOSTILE_CREEPS || type === C.FIND_HOSTILE_POWER_CREEPS) list = [];
@@ -150,14 +172,15 @@ function makeRoom(opts) {
         },
         createConstructionSite(x, y, structureType) {
             createdSites.push([x, y, structureType]);
-            sites.push({ structureType, pos: pos(x, y), my: true, progress: 0, progressTotal: 3000 });
+            sites.push({ structureType, pos: pos(x, y), my: true, progress: 0, progressTotal: 3000, room });
             return OK;
         },
         lookAt(x, y) { return []; }
     };
     for (const s of structures) s.room = room;
+    for (const c of creeps) c.room = room;
     source.room = room;
-    return { room, spawn, controller, extensions, sites, source };
+    return { room, spawn, controller, extensions, sites, source, creeps };
 }
 
 // ---- game ----------------------------------------------------------------
@@ -186,7 +209,7 @@ function check(name, cond, detail) {
     console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${detail ? ' :: ' + detail : ''}`);
 }
 
-const bot = require('/workspace/repo/dist/main.js');
+const bot = require(require('path').join(__dirname, '..', 'dist', 'main.js'));
 
 function runTicks(sim, n, step) {
     for (let i = 0; i < n; i++) {
@@ -224,8 +247,10 @@ function runTicks(sim, n, step) {
     check('sealed spawn is reported to the user',
         notifications.some((m) => /sealed/i.test(m)),
         JSON.stringify(notifications));
-    check('nothing is destroyed before the heal delay',
-        destroyed.length === 0, JSON.stringify(destroyed));
+    check('the birth ring is freed immediately — a blocked spawn must not wait',
+        destroyed.length >= 1 && destroyed.every(([x, y]) =>
+            Math.max(Math.abs(x - 19), Math.abs(y - 26)) === 1),
+        JSON.stringify(destroyed));
 }
 
 // --- Scenario 3: sealed spawn is self-healed --------------------------------
@@ -237,11 +262,10 @@ function runTicks(sim, n, step) {
     });
     global.Memory = {};
     runTicks(sim, 40, () => { tick += 3; });
-    check('an adjacent extension is destroyed to unseal the spawn',
-        destroyed.length === 1 && Math.max(Math.abs(destroyed[0][0] - 19), Math.abs(destroyed[0][1] - 26)) === 1,
+    check('the ring is freed so that the spawn can place creeps again',
+        destroyed.length >= 1 && destroyed.every(([x, y]) =>
+            Math.max(Math.abs(x - 19), Math.abs(y - 26)) === 1),
         JSON.stringify(destroyed));
-    check('extensions are not destroyed repeatedly while the spawn stays sealed',
-        destroyed.length === 1, JSON.stringify(destroyed));
 }
 
 // --- Scenario 4: a healthy spawn is left alone ------------------------------
@@ -256,6 +280,65 @@ function runTicks(sim, n, step) {
     check('a healthy spawn is not touched',
         destroyed.length === 0 && notifications.every((m) => !/sealed/i.test(m)),
         `destroyed=${JSON.stringify(destroyed)} notified=${JSON.stringify(notifications)}`);
+}
+
+// --- Scenario 5: a creep standing on a birth tile seals the spawn ----------
+// This is the 2026-10-25 failure: the ring was free by structures, but our
+// own creep stood on the last free tile. The engine counts creeps as
+// obstacles, the bot used to ignore them — and never noticed.
+{
+    destroyed.length = 0; notifications.length = 0; movedCreeps.length = 0;
+    const sim = makeRoom({
+        extensions: [[18, 26], [20, 26], [18, 27], [19, 27]],
+        sites: [[20, 25], [20, 27]],
+        creeps: [[19, 25]]
+    });
+    global.Memory = {};
+    runTicks(sim, 40, () => { tick += 3; });
+    check('a creep on the birth ring is taken into account',
+        notifications.some((m) => /sealed/i.test(m)) || movedCreeps.length > 0,
+        `notified=${JSON.stringify(notifications)} moved=${JSON.stringify(movedCreeps)}`);
+    check('the spawn ring keeps free birth tiles for the engine',
+        destroyed.length >= 1,
+        JSON.stringify(destroyed));
+}
+
+// --- Scenario 6: ring reserve destroys extensions when too few tiles are free
+{
+    destroyed.length = 0; notifications.length = 0;
+    const sim = makeRoom({
+        extensions: [[18, 26], [20, 26], [18, 27], [19, 27]],
+        sites: [[20, 25], [20, 27]]
+    });
+    global.Memory = {};
+    runTicks(sim, 60, () => { tick += 3; });
+    check('the ring reserve frees birth tiles by dropping ring-1 extensions',
+        destroyed.length >= 1 &&
+        destroyed.every(([x, y]) => Math.max(Math.abs(x - 19), Math.abs(y - 26)) === 1),
+        JSON.stringify(destroyed));
+}
+
+// --- Scenario 7: creeps that fill every free birth tile are pushed away ----
+// The structural ring is fine (3 free tiles), but our own creeps stand on all
+// of them. The engine cannot place a creep, so the bot must move them.
+{
+    destroyed.length = 0; notifications.length = 0; movedCreeps.length = 0;
+    const sim = makeRoom({
+        extensions: [[18, 26], [18, 27], [19, 27], [20, 27]],
+        sites: [],
+        creeps: [[19, 25], [20, 25], [20, 26]]
+    });
+    global.Memory = {};
+    runTicks(sim, 40, () => { tick += 3; });
+    check('creeps covering every free birth tile are reported as the cause',
+        notifications.some((m) => /sealed/i.test(m)),
+        JSON.stringify(notifications));
+    check('those creeps are asked to step off the birth ring',
+        movedCreeps.length > 0,
+        JSON.stringify(movedCreeps));
+    check('a comfortable ring is not demolished because of standing creeps',
+        destroyed.length === 0,
+        JSON.stringify(destroyed));
 }
 
 const failed = results.filter((r) => !r.ok);

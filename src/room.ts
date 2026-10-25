@@ -11,11 +11,17 @@ import {
     WALL_TERRAIN,
     EXTENSION_CHECK_INTERVAL,
     SPAWN_CLEAR_RADIUS,
+    SPAWN_BIRTH_TILES_MIN,
     SEALED_SPAWN_HEAL_DELAY,
     SEALED_SPAWN_HEAL_RETRY
 } from './constants';
 import { trySpawn } from './spawn';
-import { countFreeBirthTiles } from './utilities';
+import {
+    inspectSpawnRing,
+    findFreeTileNear,
+    blocksBirthRing,
+    type SpawnRingInfo
+} from './utilities';
 import * as log from './log';
 import * as harvester from './roles/harvester';
 import * as upgrader from './roles/upgrader';
@@ -78,6 +84,7 @@ export function run(room: Room): void {
 
     ensureSpawn(room);
     ensureSpawnAccessible(room);
+    ensureSpawnRingReserve(room);
 
     const defense = planDefense(room);
     if (defense.enabled) {
@@ -276,9 +283,17 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
 
     const extensionSites = room.find(FIND_MY_CONSTRUCTION_SITES, {
         filter: (s) => s.structureType === STRUCTURE_EXTENSION
-    }).length;
+    });
 
-    const need = layout.maxExtensions - existingExtensions - extensionSites;
+    // Сайты расширений в кольце радиуса 1 вокруг спавна бот не строит (см.
+    // `roles/builder.ts`): они занимают клетку рождения. Считать их
+    // «запланированными» расширениями нельзя — иначе бот не закажет
+    // замену, и кольцо так и останется занятым.
+    const buildableExtensionSites = extensionSites.filter(
+        (s) => !blocksBirthRing(room, s.pos.x, s.pos.y)
+    ).length;
+
+    const need = layout.maxExtensions - existingExtensions - buildableExtensionSites;
 
     if (need <= 0) {
         return;
@@ -427,23 +442,87 @@ function runTowers(room: Room, defense: { attackHostiles: boolean; healInjured: 
 }
 
 /**
+ * Держит вокруг спавна запас свободных клеток, в которые движок может
+ * поставить нового крипа.
+ *
+ * @remarks
+ * Вокруг спавна восемь клеток. Если свободна хотя бы одна — спавн работает,
+ * но держится на одном крипе: как только этот крип встаёт на единственную
+ * свободную клетку, спавн запечатывается и колония замирает без единой
+ * ошибки. Именно так выглядела остановка 2026-10-25: пять расширений в
+ * кольце радиуса 1, из них бот снёс одно, и на освободившуюся клетку
+ * родился крип, который там и замер.
+ *
+ * Поэтому бот старается держать вокруг спавна хотя бы
+ * {@link SPAWN_BIRTH_TILES_MIN} свободных клеток. Если свободных меньше,
+ * сносится одно расширение в кольце радиуса 1 — постройка на расстоянии
+ * вытяжки от спавна того же стоит, а вот запечатанный спавн не лечится сам.
+ *
+ * Проверка идёт раз в {@link EXTENSION_CHECK_INTERVAL} тиков, сносится не
+ * больше одного расширения за проверку.
+ *
+ * @param room Комната, которой мы владеем.
+ */
+function ensureSpawnRingReserve(room: Room): void {
+    if (
+        room.memory._ringReserveCheckTick &&
+        Game.time - room.memory._ringReserveCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._ringReserveCheckTick = Game.time;
+
+    for (const spawn of room.find(FIND_MY_SPAWNS)) {
+        const ring = inspectSpawnRing(room, spawn);
+
+        if (ring.freeTilesWithoutCreeps >= SPAWN_BIRTH_TILES_MIN) {
+            continue;
+        }
+
+        const target = ring.adjacentExtensions[0];
+
+        if (!target || typeof target.destroy !== 'function') {
+            continue;
+        }
+
+        if (target.destroy() === OK) {
+            log.warn(
+                'room',
+                `destroyed extension at ${target.pos.x},${target.pos.y}: only ` +
+                `${ring.freeTilesWithoutCreeps} birth tile(s) left around spawn ` +
+                `${spawn.name} in ${room.name}`
+            );
+        }
+    }
+}
+
+/**
  * Проверяет, что у спавна есть свободная соседняя клетка, в которую движок
  * сможет поставить нового крипа, и при необходимости освобождает её.
  *
  * @remarks
  * Новый крип появляется на одной из восьми клеток, соседних со спавном
  * (`screeps/engine`, `src/processor/intents/spawns/_born-creep.js`). Если все
- * они заняты — расширениями, их construction sites, стеной рельефа, —
- * движок не может разместить крипа и бесконечно откладывает его появление:
- * спавн остаётся занятым, `trySpawn` не находит свободного спавна, и
- * колония умирает молча (тики идут, CPU расходуется, но ничего не
- * происходит).
+ * они заняты — расширениями, их construction sites, стеной рельефа или
+ * крипом, — движок не может разместить крипа и бесконечно откладывает его
+ * появление: спавн остаётся занятым, `trySpawn` не находит свободного
+ * спавна, и колония умирает молча (тики идут, CPU расходуется, но ничего
+ * не происходит).
+ *
+ * Крипы считаются занявшими клетку: движок не поставит крипа на клетку с
+ * другим крипом (`OBSTACLE_OBJECT_TYPES` включает `creep`). Раньше бот их
+ * игнорировал — и поэтому не видел запечатанный спавн в тот самый момент,
+ * когда кольцо закрывал единственный застрявший крип.
  *
  * Проверка идёт раз в {@link EXTENSION_CHECK_INTERVAL} тиков. Если спавн
- * запечатан дольше {@link SEALED_SPAWN_HEAL_DELAY} тиков, бот сносит одно
- * соседнее расширение, освобождая клетку: восстановить спавн иначе нечем —
- * construction sites в штатном API отменить нельзя, а структуры сносить
- * больше нечем.
+ * запечатан дольше {@link SEALED_SPAWN_HEAL_DELAY} тиков, бот освобождает
+ * клетку. Что именно освобождать — решает структура запечатывания:
+ * - если структурно свободные клетки есть, мешают наши крипы: бот двигает
+ *   их с клеток рождения;
+ * - если свободных клеток нет вообще, кольцо забито постройками: бот сносит
+ *   расширения в кольце радиуса 1 (construction sites в штатном API
+ *   отменить нельзя, а расширения — можно).
  *
  * @param room Комната, которой мы владеем.
  */
@@ -458,7 +537,27 @@ function ensureSpawnAccessible(room: Room): void {
     room.memory._spawnAccessCheckTick = Game.time;
 
     for (const spawn of room.find(FIND_MY_SPAWNS)) {
-        if (countFreeBirthTiles(room, spawn) > 0) {
+        const ring = inspectSpawnRing(room, spawn);
+
+        // Снимок состояния кольца — только когда кольцо действительно тесное.
+        // В этот момент чаще всего и нужен разбор: кто занял клетку.
+        if (ring.freeTiles.length < 4) {
+            room.memory._ringDebug = {
+                tick: Game.time,
+                spawn: `${spawn.pos.x},${spawn.pos.y}`,
+                terrain: ring.birthTiles
+                    .map((t) => `${t.x},${t.y}=${room.getTerrain().get(t.x, t.y)}`)
+                    .join(' '),
+                free: ring.freeTiles.map((t) => `${t.x},${t.y}`).join(' '),
+                freeNoCreeps: ring.freeTilesWithoutCreeps,
+                creeps: room
+                    .find(FIND_CREEPS)
+                    .map((c) => `${c.name}@${c.pos.x},${c.pos.y}`)
+                    .join(' ')
+            };
+        }
+
+        if (ring.freeTiles.length > 0) {
             delete room.memory._sealedSpawnTick;
             delete room.memory._sealedSpawnHealTick;
             continue;
@@ -471,7 +570,8 @@ function ensureSpawnAccessible(room: Room): void {
             log.warn(
                 'room',
                 `spawn ${spawn.name} in ${room.name} is sealed — the engine cannot place ` +
-                'new creeps, the colony is idle. The bot will free a cell shortly.'
+                `new creeps, the colony is idle. Blocked by ${ring.birthTiles.length - ring.freeTiles.length} ` +
+                'birth tile(s); the bot will free a cell shortly.'
             );
             continue;
         }
@@ -488,31 +588,96 @@ function ensureSpawnAccessible(room: Room): void {
             continue;
         }
 
-        const blocked = room.find(FIND_MY_STRUCTURES, {
-            filter: (s) =>
-                s.structureType === STRUCTURE_EXTENSION &&
-                Math.max(
-                    Math.abs(s.pos.x - spawn.pos.x),
-                    Math.abs(s.pos.y - spawn.pos.y)
-                ) === 1
-        });
+        // Клетки есть, но заняты нашими крипами: лечим не постройки, а их.
+        if (ring.freeTilesWithoutCreeps > 0) {
+            const moved = moveCreepsOffBirthTiles(room, spawn, ring);
 
-        const target = blocked[0];
+            room.memory._sealedSpawnTick = Game.time;
+            room.memory._sealedSpawnHealTick = Game.time;
 
-        if (!target || typeof target.destroy !== 'function') {
+            log.warn(
+                'room',
+                `spawn ${spawn.name} in ${room.name} is blocked by ` +
+                `${ring.creepsOnBirthTiles.length} of our creeps on the birth ring — ` +
+                `${moved} moved away`
+            );
+
             continue;
         }
 
-        const result = target.destroy();
+        // Кольцо забито постройками: сносим расширения, освобождая клетки.
+        if (ring.adjacentExtensions.length > 0) {
+            let destroyed = 0;
 
-        if (result === OK) {
+            for (const ext of ring.adjacentExtensions) {
+                if (typeof ext.destroy !== 'function') {
+                    continue;
+                }
+
+                if (ext.destroy() === OK) {
+                    destroyed++;
+                }
+            }
+
             room.memory._sealedSpawnTick = Game.time;
             room.memory._sealedSpawnHealTick = Game.time;
+
             log.warn(
                 'room',
-                `destroyed extension at ${target.pos.x},${target.pos.y} to unseal spawn ` +
-                `${spawn.name} in ${room.name}`
+                `destroyed ${destroyed} extension(s) around spawn ${spawn.name} in ` +
+                `${room.name} to unseal it`
             );
+
+            continue;
+        }
+
+        log.warn(
+            'room',
+            `spawn ${spawn.name} in ${room.name} is sealed and cannot be fixed ` +
+            'automatically: construction sites cannot be cancelled via the API and ' +
+            'there are no extensions to destroy. Manual action required.'
+        );
+    }
+}
+
+/**
+ * Сдвигает наших крипов с клеток рождения вокруг спавна.
+ *
+ * @remarks
+ * Клетку рождения занимает чаще всего крип, который не может уйти: цель его
+ * движения недостижима (например, источник лежит на стене рельефа, и пути к
+ * нему не существует), поэтому крип замирает на месте. Если свободна только
+ * эта клетка, спавн запечатывается.
+ *
+ * @param room  Комната.
+ * @param spawn Спавн, вокруг которого ищем занятые клетки.
+ * @param ring  Снимок состояния кольца клеток рождения.
+ * @returns Сколько крипов получили новую цель.
+ */
+function moveCreepsOffBirthTiles(
+    room: Room,
+    spawn: StructureSpawn,
+    ring: SpawnRingInfo
+): number {
+    const birthTiles = new Set<string>();
+
+    for (const tile of ring.birthTiles) {
+        birthTiles.add(`${tile.x},${tile.y}`);
+    }
+
+    let moved = 0;
+
+    for (const creep of ring.creepsOnBirthTiles) {
+        const target = findFreeTileNear(room, creep.pos, birthTiles);
+
+        if (!target) {
+            continue;
+        }
+
+        if (creep.moveTo(target) === OK) {
+            moved++;
         }
     }
+
+    return moved;
 }
