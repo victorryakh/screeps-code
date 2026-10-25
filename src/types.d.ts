@@ -83,6 +83,17 @@ declare global {
         _extensionCheckTick?: number;
         /** Тик последней проверки доступности спавна для появления крипов (см. `ensureSpawnAccessible`). */
         _spawnAccessCheckTick?: number;
+        /** Тик последней проверки запаса свободных клеток рождения (см. `ensureSpawnRingReserve`). */
+        _ringReserveCheckTick?: number;
+        /** Диагностический снимок состояния кольца клеток рождения (пишется, когда кольцо тесное). */
+        _ringDebug?: {
+            tick: number;
+            spawn: string;
+            terrain: string;
+            free: string;
+            freeNoCreeps: number;
+            creeps: string;
+        };
         /** Тик, с которого спавн считается запечатанным; сбрасывается, как только свободная клетка появилась. */
         _sealedSpawnTick?: number;
         /** Тик последней попытки освободить клетку у запечатанного спавна (см. `ensureSpawnAccessible`). */
