@@ -449,8 +449,8 @@ function actions(creep, kind) {
     check('the worker takes energy from a structure',
         withdraws.length > 0,
         JSON.stringify(withdraws));
-    check('the worker takes only a small amount at a time',
-        withdraws.every((w) => w[3] === undefined || w[3] <= 10),
+    check('the worker takes a full load, not a trickle',
+        withdraws.every((w) => w[3] === undefined || w[3] > 10),
         JSON.stringify(withdraws));
 }
 

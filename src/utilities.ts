@@ -4,8 +4,7 @@ import {
     REPAIR_THRESHOLD,
     BIRTH_BLOCKING_TYPES,
     WALL_TERRAIN,
-    UPGRADE_RANGE,
-    DONOR_WITHDRAW_QUOTA
+    UPGRADE_RANGE
 } from './constants';
 import { EXPANSION } from './strategy';
 
@@ -870,10 +869,10 @@ export function findEnergyDonor(creep: Creep): AnyStoreStructure | null {
  * к ней через {@link moveCached}.
  *
  * @remarks
- * Забирается не больше {@link DONOR_WITHDRAW_QUOTA} — ровно на несколько
- * тиков работы. Иначе крип забирает энергию, которая ещё нужна колонии: на
- * спавн заменяющегося крипа (крипы умирают от старости на 1500-м тике) или
- * другому рабочему крипу.
+ * Забирается весь свободный запас структуры: полный рюкзак — это ~25 тиков
+ * работы, и сходить за энергией по частям рабочий крип не должен (каждый
+ * поход — это потерянное время и CPU). Сколько рабочих крипов в комнате
+ * нужно, решает бюджет (`computeWorkBudget`), а не размер рюкзака.
  *
  * @param creep  Крип, который берёт энергию.
  * @param donor  Спавн или расширение с энергией. `null`/`undefined`
@@ -892,8 +891,7 @@ export function withdrawEnergy(
 
     const amount = Math.min(
         creep.store.getFreeCapacity(RESOURCE_ENERGY),
-        donor.store.energy,
-        DONOR_WITHDRAW_QUOTA
+        donor.store.energy
     );
 
     if (amount <= 0) {
