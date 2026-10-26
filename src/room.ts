@@ -8,6 +8,7 @@
 
 import {
     ROLE,
+    type RoleKey,
     WALL_TERRAIN,
     EXTENSION_CHECK_INTERVAL,
     SPAWN_CLEAR_RADIUS,
@@ -21,6 +22,8 @@ import {
     findFreeTileNear,
     blocksBirthRing,
     collectHarvestSlots,
+    bodyCost,
+    bodyFor,
     type SpawnRingInfo
 } from './utilities';
 import * as log from './log';
@@ -94,6 +97,8 @@ export function run(room: Room): void {
     }
 
     const spawnOrder = planSpawnOrder(room, counts);
+
+    updateDonorReserve(room, spawnOrder, counts);
 
     for (const pair of spawnOrder) {
         const role = pair[0];
@@ -497,6 +502,41 @@ function ensureSpawnRingReserve(room: Room): void {
             );
         }
     }
+}
+
+/**
+ * Считает, сколько энергии комнате нельзя забирать «на сторону»: ровно
+ * столько, сколько стоит следующий крип, которого бот собирается завести.
+ *
+ * @remarks
+ * Роли, которые берут энергию из спавна/расширений (см.
+ * {@link isSourceSaturated}), не должны высасывать комнату в ноль: `spawnCreep`
+ * оплачивается из энергии структур комнаты, а крипы в Screeps умирают от
+ * старости на 1500-м тике. Если энергии не хватит на замену, колония
+ * начнёт терять роли одна за другой.
+ *
+ * Пока бот не собирается никого заводить, резерв равен нулю — энергию можно
+ * забирать всю.
+ *
+ * @param room       Комната.
+ * @param spawnOrder План спавна: пары `[роль, целевое количество]`.
+ * @param counts     Текущий состав ролей комнаты.
+ */
+function updateDonorReserve(
+    room: Room,
+    spawnOrder: [RoleKey, number][],
+    counts: Record<string, number>
+): void {
+    let reserve = 0;
+
+    for (const [role, target] of spawnOrder) {
+        if ((counts[role] || 0) < target) {
+            reserve = bodyCost(bodyFor(role));
+            break;
+        }
+    }
+
+    room.memory._donorReserve = reserve;
 }
 
 /**

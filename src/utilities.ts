@@ -870,10 +870,11 @@ export function findEnergyDonor(creep: Creep): AnyStoreStructure | null {
  * к ней через {@link moveCached}.
  *
  * @remarks
- * Забирается не больше, чем в комнате есть энергии сверх резерва
- * {@link DONOR_ENERGY_RESERVE}: резерва хватает на оплату одного спавна
- * (`spawnCreep` берёт энергию из структур комнаты), а без него колония не
- * сможет заменить умерших крипов.
+ * Забирается не больше, чем в комнате есть энергии сверх резерва: резерва
+ * хватает на оплату того крипа, которого бот собирается завести
+ * (`room.memory._donorReserve`, см. `updateDonorReserve`). Без этого колония
+ * не сможет заменить умерших крипов: `spawnCreep` берёт энергию из структур
+ * комнаты, а крипы в Screeps умирают от старости на 1500-м тике.
  *
  * @param creep  Крип, который берёт энергию.
  * @param donor  Спавн или расширение с энергией. `null`/`undefined`
@@ -890,7 +891,8 @@ export function withdrawEnergy(
         return ERR_INVALID_TARGET;
     }
 
-    const budget = creep.room.energyAvailable - DONOR_ENERGY_RESERVE;
+    const reserve = creep.room.memory._donorReserve ?? DONOR_ENERGY_RESERVE;
+    const budget = creep.room.energyAvailable - reserve;
 
     if (budget <= 0) {
         return ERR_NOT_ENOUGH_ENERGY;

@@ -333,6 +333,8 @@ function actions(creep, kind) {
 // --- Scenario 2: the source is saturated -> upgraders take energy from the spawn
 {
     const sim = makeRoom({
+        spawnEnergy: 300,
+        extensions: [[18, 26, 50], [21, 26, 50]],
         creeps: [
             [21, 21, 'harvester', 0],
             [21, 22, 'harvester', 0],
@@ -402,9 +404,10 @@ function actions(creep, kind) {
 }
 
 
-// --- Scenario 5: the reserve for creep spawning is respected ----------------
-// The spawn pays for new creeps, so the room must keep enough energy to spawn
-// one. Taking everything from the spawn leaves the colony with no reserves.
+// --- Scenario 5: the reserve for the next creep is respected ---------------
+// The spawn pays for new creeps and creeps die of old age, so the room must
+// keep enough energy for the creep the bot is about to spawn. Here the next
+// creep is an upgrader (300 energy) and the room has less than that.
 {
     const sim = makeRoom({
         spawnEnergy: 250,
@@ -418,11 +421,31 @@ function actions(creep, kind) {
     runTicks(sim, 1);
     const upgrader = sim.creeps.find((c) => c.memory.role === 'upgrader');
     const withdraws = actions(upgrader, 'withdraw');
-    check('the upgrader takes energy from the spawn',
+    check('the upgrader does not take the energy reserved for the next spawn',
+        withdraws.length === 0 && sim.room.energyAvailable === 250,
+        `withdraw=${JSON.stringify(withdraws)} room energy=${sim.room.energyAvailable}`);
+}
+
+// --- Scenario 5b: the surplus above the reserve is available ---------------
+{
+    const sim = makeRoom({
+        spawnEnergy: 300,
+        extensions: [[18, 26, 50], [21, 26, 50]],
+        creeps: [
+            [21, 21, 'harvester', 0],
+            [21, 22, 'harvester', 0],
+            [21, 23, 'harvester', 0],
+            [20, 27, 'upgrader', 0]
+        ]
+    });
+    runTicks(sim, 1);
+    const upgrader = sim.creeps.find((c) => c.memory.role === 'upgrader');
+    const withdraws = actions(upgrader, 'withdraw');
+    check('the upgrader takes the surplus above the reserve',
         withdraws.length > 0,
         JSON.stringify(withdraws));
-    check('the reserve for one creep spawn is left in the room',
-        sim.room.energyAvailable >= 200,
+    check('the reserve for the next spawn is still in the room',
+        sim.room.energyAvailable >= 300,
         `room energy=${sim.room.energyAvailable}`);
 }
 
