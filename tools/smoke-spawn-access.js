@@ -123,7 +123,9 @@ function makeRoom(opts) {
     }));
     const creeps = (opts.creeps || []).map(([x, y], i) => ({
         name: `creep_${i}`, pos: pos(x, y), my: true, hits: 300, hitsMax: 300,
-        fatigue: 0, store: { energy: 0 }, memory: { role: 'harvester', homeRoom: 'E34S53' },
+        fatigue: 0, store: { energy: 0 },
+        body: [{ type: 'work', hits: 100 }, { type: 'carry', hits: 100 }, { type: 'move', hits: 100 }],
+        memory: { role: 'harvester', homeRoom: 'E34S53' },
         room: null,
         moveTo(target) { movedCreeps.push([x, y, target.x, target.y]); return OK; },
         moveByPath() { return -4; }

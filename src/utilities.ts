@@ -1,4 +1,11 @@
-import { ROLE, HOME_PATH_TTL, REPAIR_THRESHOLD, BIRTH_BLOCKING_TYPES, WALL_TERRAIN } from './constants';
+import {
+    ROLE,
+    HOME_PATH_TTL,
+    REPAIR_THRESHOLD,
+    BIRTH_BLOCKING_TYPES,
+    WALL_TERRAIN,
+    UPGRADE_RANGE
+} from './constants';
 import { EXPANSION } from './strategy';
 
 /**
@@ -698,41 +705,43 @@ export function blocksBirthRing(room: Room, x: number, y: number): boolean {
 }
 
 /**
- * Ищет клетки рядом с целью, на которые крип может встать и всё равно
- * достать до цели (радиус действия добычи — 1 клетка).
+ * Считает клетки добычи вокруг цели: те, с которых крип может добывать
+ * (радиус действия добычи — 1 клетка) и на которых может стоять.
  *
  * @remarks
- * Нужно потому, что на клетку самого источника крип встать не может:
- * источник — препятствие для движения (`OBSTACLE_OBJECT_TYPES`), и если он
- * ещё и лежит на стене рельефа, путь к нему в принципе не существует.
- * Классический случай: источник в «кармане» из стен, где к нему ведёт
- * единственный проход, а крип намертво застревает на его подходе, потому
- * что `moveTo(source)` не находит пути.
+ * Клетки добычи — это ограниченный ресурс: в комнате, где источник лежит на
+ * стене рельефа, проходимых соседей у него всего три. Поэтому список
+ * считается один раз на комнату и используется и для выбора клетки добычи,
+ * и для оценки «насыщенности» источника (см. {@link isSourceSaturated}).
  *
- * @param creep  Крип, которому нужен подход.
+ * Крипы в расчёт не входят: занятая крипом клетка добычи не перестаёт быть
+ * клеткой добычи — она просто ждёт очереди (см. {@link findHarvestTiles}).
+ *
+ * @param room   Комната с целью.
  * @param target Цель добычи (`Source`, `Mineral`, `Deposit`).
- * @returns Подходящие клетки, ближайшая к крипу — первой.
+ * @returns Список пригодных клеток добычи.
  */
-export function findHarvestTiles(
-    creep: Creep,
+export function collectHarvestSlots(
+    room: Room,
     target: Source | Mineral | Deposit
 ): RoomPosition[] {
-    const room = creep.room;
     const terrain = room.getTerrain();
-
-    const occupied = new Set<string>();
+    const blocked = new Set<string>();
 
     for (const s of room.find(FIND_STRUCTURES)) {
-        if (BIRTH_BLOCKING_TYPES.indexOf(s.structureType) !== -1) {
-            occupied.add(`${s.pos.x},${s.pos.y}`);
+        // Дорогу крип может занимать, любую другую структуру — нет.
+        if (s.structureType === STRUCTURE_ROAD) {
+            continue;
         }
+
+        blocked.add(`${s.pos.x},${s.pos.y}`);
     }
 
-    for (const c of room.find(FIND_CREEPS)) {
-        occupied.add(`${c.pos.x},${c.pos.y}`);
+    for (const c of room.find(FIND_CONSTRUCTION_SITES)) {
+        blocked.add(`${c.pos.x},${c.pos.y}`);
     }
 
-    const candidates: RoomPosition[] = [];
+    const slots: RoomPosition[] = [];
 
     for (let dx = -1; dx <= 1; dx++) {
         for (let dy = -1; dy <= 1; dy++) {
@@ -751,7 +760,232 @@ export function findHarvestTiles(
                 continue;
             }
 
-            if (occupied.has(`${x},${y}`)) {
+            if (blocked.has(`${x},${y}`)) {
+                continue;
+            }
+
+            slots.push(new RoomPosition(x, y, room.name));
+        }
+    }
+
+    return slots;
+}
+
+/**
+ * Ищет клетки рядом с целью, на которые крип может встать и всё равно
+ * достать до цели (радиус действия добычи — 1 клетка).
+ *
+ * @remarks
+ * Нужно потому, что на клетку самого источника крип встать не может:
+ * источник — препятствие для движения (`OBSTACLE_OBJECT_TYPES`), и если он
+ * ещё и лежит на стене рельефа, путь к нему в принципе не существует.
+ * Классический случай: источник в «кармане» из стен, где к нему ведёт
+ * единственный проход, а крип намертво застревает на своём подходе, потому
+ * что `moveTo(source)` не находит пути.
+ *
+ * Занятые клетки не отбрасываются, а уходят в конец списка: если все клетки
+ * добычи заняты, крип должен стоять и ждать освобождения, а не бродить по
+ * комнате в поисках цели, которой для него всё равно не существует. Именно
+ * это и убивало колонию в E34S53: три апгрейдера держали все три клетки
+ * добычи, харвестеры не получали цели вовсе и копили энергию по нулям.
+ *
+ * @param creep  Крип, которому нужен подход.
+ * @param target Цель добычи (`Source`, `Mineral`, `Deposit`).
+ * @returns Подходящие клетки: сначала свободные, затем занятые; ближайшая к
+ *          крипу — первой.
+ */
+export function findHarvestTiles(
+    creep: Creep,
+    target: Source | Mineral | Deposit
+): RoomPosition[] {
+    const room = creep.room;
+    const slots = collectHarvestSlots(room, target);
+
+    const occupied = new Set<string>();
+
+    for (const c of room.find(FIND_CREEPS)) {
+        occupied.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    const free: RoomPosition[] = [];
+    const taken: RoomPosition[] = [];
+
+    for (const slot of slots) {
+        if (occupied.has(`${slot.x},${slot.y}`)) {
+            taken.push(slot);
+        } else {
+            free.push(slot);
+        }
+    }
+
+    const byDistance = (a: RoomPosition, b: RoomPosition): number => {
+        const da = Math.max(Math.abs(a.x - creep.pos.x), Math.abs(a.y - creep.pos.y));
+        const db = Math.max(Math.abs(b.x - creep.pos.x), Math.abs(b.y - creep.pos.y));
+
+        if (da !== db) {
+            return da - db;
+        }
+
+        return a.x + a.y - (b.x + b.y);
+    };
+
+    free.sort(byDistance);
+    taken.sort(byDistance);
+
+    return free.concat(taken);
+}
+
+/**
+ * Ищет ближайшую структуру, из которой можно забрать энергию: спавн или
+ * расширение с ненулевым запасом.
+ *
+ * @remarks
+ * Это «донор» для ролей, которые не могут добывать сами (см.
+ * {@link withdrawEnergy}): когда источник насыщен и все клетки добычи
+ * заняты, энергию для апгрейда/стройки/ремонта приходится брать из
+ * структуры, куда её сливают харвестеры.
+ *
+ * @param creep Крип, относительно которого ищется донор.
+ * @returns Структура с энергией или `null`.
+ */
+export function findEnergyDonor(creep: Creep): AnyStoreStructure | null {
+    const donor = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
+        filter: (s) =>
+            (s.structureType === STRUCTURE_SPAWN ||
+                s.structureType === STRUCTURE_EXTENSION) &&
+            'store' in s &&
+            s.store.energy > 0
+    });
+
+    if (!donor) {
+        return null;
+    }
+
+    return donor as AnyStoreStructure;
+}
+
+/**
+ * Забирает энергию из структуры-донора. Если крип не рядом — перемещается
+ * к ней через {@link moveCached}.
+ *
+ * @remarks
+ * Забирается весь свободный запас структуры: полный рюкзак — это ~25 тиков
+ * работы, и сходить за энергией по частям рабочий крип не должен (каждый
+ * поход — это потерянное время и CPU). Сколько рабочих крипов в комнате
+ * нужно, решает бюджет (`computeWorkBudget`), а не размер рюкзака.
+ *
+ * @param creep  Крип, который берёт энергию.
+ * @param donor  Спавн или расширение с энергией. `null`/`undefined`
+ *               возвращает `ERR_INVALID_TARGET`.
+ * @param opts   Опции `MoveToOpts`, пробрасываемые в `moveCached`.
+ * @returns `OK`, `ERR_INVALID_TARGET` или код перемещения/ошибки движка.
+ */
+export function withdrawEnergy(
+    creep: Creep,
+    donor: AnyStoreStructure | null | undefined,
+    opts?: MoveToOpts
+): ScreepsReturnCode {
+    if (!donor) {
+        return ERR_INVALID_TARGET;
+    }
+
+    const amount = Math.min(
+        creep.store.getFreeCapacity(RESOURCE_ENERGY),
+        donor.store.energy
+    );
+
+    if (amount <= 0) {
+        return ERR_NOT_ENOUGH_RESOURCES;
+    }
+
+    const result = creep.withdraw(donor, RESOURCE_ENERGY, amount);
+
+    if (result === ERR_NOT_IN_RANGE) {
+        return moveCached(creep, donor, withCreepsIgnored(opts));
+    }
+
+    return result;
+}
+
+/**
+ * Ищет клетку, с которой можно апгрейдить контроллер, не занимая при этом
+ * ни клетку добычи, ни клетку рождения.
+ *
+ * @remarks
+ * Апгрейд контроллера работает с расстояния 3 (`upgradeController` проверяет
+ * `inRangeTo(pos, 3)`), поэтому апгрейдеру не обязательно стоять вплотную к
+ * контроллеру. Это важно в тесных комнатах: клетка вплотную к контроллеру
+ * может быть единственной, и тогда несколько апгрейдеров забиваются на одну
+ * точку.
+ *
+ * Клетки добычи исключены — они принадлежат харвестерам. Кольцо рождения
+ * вокруг спавна тоже исключено: вставший на него крип закрывает спавн.
+ *
+ * @param room  Комната.
+ * @param creep Крип, для которого ищется место (его собственная клетка не
+ *              считается занятой).
+ * @returns Клетка для апгрейда или `null`, если подходящих клеток нет.
+ */
+export function findUpgradeSpot(room: Room, creep: Creep): RoomPosition | null {
+    const controller = room.controller;
+
+    if (!controller) {
+        return null;
+    }
+
+    const terrain = room.getTerrain();
+    const blocked = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        if (s.structureType === STRUCTURE_ROAD) {
+            continue;
+        }
+
+        blocked.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const c of room.find(FIND_CONSTRUCTION_SITES)) {
+        blocked.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    for (const c of room.find(FIND_CREEPS)) {
+        if (c.name === creep.name) {
+            continue;
+        }
+
+        blocked.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    for (const source of room.find(FIND_SOURCES)) {
+        for (const slot of collectHarvestSlots(room, source)) {
+            blocked.add(`${slot.x},${slot.y}`);
+        }
+    }
+
+    const candidates: RoomPosition[] = [];
+
+    for (let dx = -UPGRADE_RANGE; dx <= UPGRADE_RANGE; dx++) {
+        for (let dy = -UPGRADE_RANGE; dy <= UPGRADE_RANGE; dy++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) > UPGRADE_RANGE) {
+                continue;
+            }
+
+            const x = controller.pos.x + dx;
+            const y = controller.pos.y + dy;
+
+            if (x < 1 || x > 48 || y < 1 || y > 48) {
+                continue;
+            }
+
+            if (terrain.get(x, y) === WALL_TERRAIN) {
+                continue;
+            }
+
+            if (blocked.has(`${x},${y}`)) {
+                continue;
+            }
+
+            if (blocksBirthRing(room, x, y)) {
                 continue;
             }
 
@@ -770,5 +1004,23 @@ export function findHarvestTiles(
         return a.x + a.y - (b.x + b.y);
     });
 
-    return candidates;
+    return candidates[0] ?? null;
+}
+
+/**
+ * Сообщает, насыщен ли источник комнаты: хватает ли клеток добычи на всех
+ * харвестеров.
+ *
+ * @remarks
+ * Флаг ставится в `room.run` раз в `EXTENSION_CHECK_INTERVAL` тиков. Когда
+ * источник насыщен, роли, которые тоже умеют добывать (апгрейдер, билдер,
+ * ремонтник), берут энергию из спавна/расширений, а не вытесняют
+ * харвестеров с клеток добычи. В обычных комнатах, где клеток добычи
+ * хватает всем, поведение не меняется.
+ *
+ * @param room Комната.
+ * @returns `true`, если источник насыщен.
+ */
+export function isSourceSaturated(room: Room): boolean {
+    return room.memory._sourceSaturated === true;
 }

@@ -41,10 +41,27 @@ declare global {
         building?: boolean;
         /** Флаг стейт-машины `repairer`-а: `true` — крип чинит, иначе пополняет запас. */
         repairing?: boolean;
+        /**
+         * `true` — крипов такой роли в комнате больше, чем комната может
+         * прокормить (см. `markExcessWorkers`). Такой крип не берёт энергию из
+         * структур: он работает на том, что уже в рюкзаке, и не отнимает
+         * энергию у тех, кто в бюджете уложился.
+         */
+        _excess?: boolean;
         /** Тик спавна крипа; используется `metrics.recordCreepDeath` для оценки возраста. */
         _birthTick?: number;
         /** Счётчик тиков, проведённых крипом в целевой комнате (см. `roles/claimer.ts`). */
         _targetTicks?: number;
+        /**
+         * Клетка, с которой крип апгрейдит контроллер, когда источник насыщен и
+         * энергия берётся из спавна (см. `findUpgradeSpot`). Кэш, чтобы не
+         * искать место каждый тик и не метаться по комнате.
+         */
+        _upgradeSpot?: {
+            x: number;
+            y: number;
+            roomName: string;
+        };
         /**
          * Кэш маршрута, используемый {@link moveCached} для экономии CPU.
          * Содержит путь, конечную точку и момент последнего вычисления; при
@@ -69,7 +86,7 @@ declare global {
      * опциональным: бот использует его только как крайнюю меру — снести
      * расширение, если из-за него спавн оказался запечатан.
      */
-    interface Structure<T extends StructureConstant = StructureConstant> {
+    interface Structure<_T extends StructureConstant = StructureConstant> {
         /** Сносит структуру. Возвращает `OK` или код ошибки. */
         destroy?(): ScreepsReturnCode;
     }
@@ -100,6 +117,21 @@ declare global {
         _sealedSpawnHealTick?: number;
         /** Тик последней проверки необходимости construction site для спавна (см. `ensureSpawn`). */
         _spawnCheckTick?: number;
+        /** Тик последней проверки насыщенности источника (см. `updateSourceSaturation`). */
+        _sourceCheckTick?: number;
+        /** Тик последнего пересчёта бюджета энергии комнаты (см. `computeWorkBudget`). */
+        _budgetCheckTick?: number;
+        /** Сколько энергии в тик комната может тратить на работу (см. `computeWorkBudget`). */
+        _workBudget?: number;
+        /**
+         * `true`, если клеток добычи не хватает на всех харвестеров комнаты.
+         *
+         * @remarks
+         * В такой комнате апгрейдер, билдер и ремонтник не вытесняют
+         * харвестеров с клеток добычи, а берут энергию из спавна/расширений
+         * (см. `roles/upgrader.ts`).
+         */
+        _sourceSaturated?: boolean;
         /** Тик, на котором был создан последний крип; используется как однотиковый кулдаун спавна. */
         _spawnCooldown?: number;
         /** Счётчик чередования источников между харвестерами для равномерной нагрузки. */

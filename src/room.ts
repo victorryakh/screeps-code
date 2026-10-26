@@ -8,18 +8,24 @@
 
 import {
     ROLE,
+    type RoleKey,
     WALL_TERRAIN,
     EXTENSION_CHECK_INTERVAL,
     SPAWN_CLEAR_RADIUS,
     SPAWN_BIRTH_TILES_MIN,
     SEALED_SPAWN_HEAL_DELAY,
-    SEALED_SPAWN_HEAL_RETRY
+    SEALED_SPAWN_HEAL_RETRY,
+    HARVEST_RATE_PER_WORK,
+    HARVEST_EFFICIENCY,
+    CREEP_LIFE_TICKS
 } from './constants';
 import { trySpawn } from './spawn';
 import {
     inspectSpawnRing,
     findFreeTileNear,
     blocksBirthRing,
+    collectHarvestSlots,
+    bodyCost,
     type SpawnRingInfo
 } from './utilities';
 import * as log from './log';
@@ -85,13 +91,16 @@ export function run(room: Room): void {
     ensureSpawn(room);
     ensureSpawnAccessible(room);
     ensureSpawnRingReserve(room);
+    updateSourceSaturation(room, counts);
 
     const defense = planDefense(room);
     if (defense.enabled) {
         runTowers(room, defense);
     }
 
-    const spawnOrder = planSpawnOrder(room, counts);
+    const spawnOrder = planSpawnOrder(room, counts, computeWorkBudget(room, counts));
+
+    markExcessWorkers(room, homeCreeps, spawnOrder);
 
     for (const pair of spawnOrder) {
         const role = pair[0];
@@ -495,6 +504,163 @@ function ensureSpawnRingReserve(room: Room): void {
             );
         }
     }
+}
+
+/**
+ * Помечает лишних рабочих крипов: их больше, чем комната может прокормить.
+ *
+ * @remarks
+ * Бюджет (`computeWorkBudget`) ограничивает состав, но не уменьшает уже
+ * работающий состав: пока лишний апгрейдер жив, он забирает энергию из
+ * спавна/расширений и отнимает её у тех, кто в бюджете уложился. В E34S53
+ * это означало, что контроллер получал втрое меньше прогресса, чем мог.
+ *
+ * Лишние рабочие не берут энергию из структур: они дорабатывают тот запас,
+ * который уже у них в рюкзаке, и не мешают остальным. Пометка стабильна
+ * (сортировка по имени), чтобы крипы не «переизбирались» каждый тик.
+ *
+ * @param room       Комната.
+ * @param homeCreeps Крипы этой комнаты.
+ * @param spawnOrder План спавна: пары `[роль, целевое количество]`.
+ */
+function markExcessWorkers(
+    room: Room,
+    homeCreeps: Creep[],
+    spawnOrder: [RoleKey, number][]
+): void {
+    const allowed = new Map<string, number>();
+
+    for (const [role, target] of spawnOrder) {
+        allowed.set(role, target);
+    }
+
+    const byRole = new Map<string, Creep[]>();
+
+    for (const creep of homeCreeps) {
+        const role = creep.memory.role;
+
+        if (!allowed.has(role)) {
+            continue;
+        }
+
+        const list = byRole.get(role) || [];
+        list.push(creep);
+        byRole.set(role, list);
+    }
+
+    for (const [role, list] of byRole) {
+        const limit = allowed.get(role) ?? list.length;
+
+        list.sort((a, b) => (a.name < b.name ? -1 : 1));
+
+        for (let i = 0; i < list.length; i++) {
+            const creep = list[i] as Creep;
+
+            if (i >= limit) {
+                creep.memory._excess = true;
+            } else {
+                delete creep.memory._excess;
+            }
+        }
+    }
+}
+
+/**
+ * Считает, сколько энергии в тик комната может тратить на работу: апгрейд
+ * контроллера, стройку, ремонт.
+ *
+ * @remarks
+ * Бюджет = доход от добычи − стоимость замены умирающих крипов.
+ *
+ * - Доход: клеток добычи у источника может быть всего три (если источник лежит
+ *   на стене рельефа), и каждый харвестер добывает по 2 энергии за тик на
+ *   1 WORK, но часть энергии теряется на дороге до спавна и обратно.
+ * - Крипы умирают от старости на 1500-м тике, и замену нужно оплатить из
+ *   того же дохода — иначе колония постепенно теряет роли.
+ *
+ * Если бюджет не считать, бот будет планировать состав по одному только RCL
+ * и заведёт в комнату больше рабочих крипов, чем она может прокормить: в
+ * E34S53 доход ~4 энергии в тик, а состав RCL 3 (3 апгрейдера + 2 билдера +
+ * 1 ремонтник) требует ~8.
+ *
+ * @param room   Комната.
+ * @param counts Текущий состав ролей комнаты.
+ * @returns Бюджет энергии в тик.
+ */
+function computeWorkBudget(room: Room, counts: Record<string, number>): number {
+    if (
+        room.memory._budgetCheckTick &&
+        Game.time - room.memory._budgetCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return room.memory._workBudget ?? 0;
+    }
+
+    room.memory._budgetCheckTick = Game.time;
+
+    const source = room.find(FIND_SOURCES)[0];
+    const slots = source ? collectHarvestSlots(room, source).length : 0;
+    const harvesters = counts[ROLE.HARVESTER] || 0;
+
+    const income =
+        Math.min(slots, harvesters) * HARVEST_RATE_PER_WORK * HARVEST_EFFICIENCY;
+
+    let churn = 0;
+
+    for (const creep of room.find(FIND_MY_CREEPS)) {
+        churn += bodyCost(creep.body.map((part) => part.type)) / CREEP_LIFE_TICKS;
+    }
+
+    room.memory._workBudget = Math.max(0, income - churn);
+
+    return room.memory._workBudget;
+}
+
+/**
+ * Определяет, насыщен ли источник комнаты: хватает ли клеток добычи на всех
+ * харвестеров.
+ *
+ * @remarks
+ * Клетки добычи — соседи источника, с которых можно добывать. В обычной
+ * комнате их восемь, и хватает всем. Но источник может лежать на стене
+ * рельефа, и тогда проходимых соседей у него — три (в E34S53 именно так:
+ * источник (19,23) стоит на стене, доступны только (20,22), (20,23) и
+ * (20,24)).
+ *
+ * Если клеток не хватает, те, кто тоже умеет добывать (апгрейдер, билдер,
+ * ремонтник), вытесняют харвестеров с клеток добычи — и колония остаётся
+ * без энергии: харвестеры стоят с пустым рюкзаком, а весь источник уходит
+ * в контроллер. Поэтому при насыщении остальные роли берут энергию из
+ * спавна/расширений, а клетки добычи остаются за харвестерами.
+ *
+ * Проверка идёт раз в {@link EXTENSION_CHECK_INTERVAL} тиков.
+ *
+ * @param room   Комната.
+ * @param counts Состав ролей комнаты (`роль → количество`).
+ */
+function updateSourceSaturation(room: Room, counts: Record<string, number>): void {
+    if (
+        room.memory._sourceCheckTick &&
+        Game.time - room.memory._sourceCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._sourceCheckTick = Game.time;
+
+    const harvesters = counts[ROLE.HARVESTER] || 0;
+
+    if (harvesters === 0) {
+        room.memory._sourceSaturated = false;
+        return;
+    }
+
+    let slots = 0;
+
+    for (const source of room.find(FIND_SOURCES)) {
+        slots += collectHarvestSlots(room, source).length;
+    }
+
+    room.memory._sourceSaturated = slots > 0 && harvesters >= slots;
 }
 
 /**

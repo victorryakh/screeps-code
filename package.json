@@ -7,7 +7,7 @@
     "lint": "eslint src",
     "build": "bun build src/main.ts --outdir dist --target=node --format=cjs",
     "push-main": "bun run lint && bun run build && grunt screeps",
-    "smoke": "bun run build && node tools/smoke-spawn-access.js"
+    "smoke": "bun run build && node tools/smoke-spawn-access.js && node tools/smoke-source-slots.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
