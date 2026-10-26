@@ -8,6 +8,7 @@
 
 import {
     ROLE,
+    type RoleKey,
     WALL_TERRAIN,
     EXTENSION_CHECK_INTERVAL,
     SPAWN_CLEAR_RADIUS,
@@ -98,6 +99,8 @@ export function run(room: Room): void {
     }
 
     const spawnOrder = planSpawnOrder(room, counts, computeWorkBudget(room, counts));
+
+    markExcessWorkers(room, homeCreeps, spawnOrder);
 
     for (const pair of spawnOrder) {
         const role = pair[0];
@@ -499,6 +502,65 @@ function ensureSpawnRingReserve(room: Room): void {
                 `${ring.freeTilesWithoutCreeps} birth tile(s) left around spawn ` +
                 `${spawn.name} in ${room.name}`
             );
+        }
+    }
+}
+
+/**
+ * Помечает лишних рабочих крипов: их больше, чем комната может прокормить.
+ *
+ * @remarks
+ * Бюджет (`computeWorkBudget`) ограничивает состав, но не уменьшает уже
+ * работающий состав: пока лишний апгрейдер жив, он забирает энергию из
+ * спавна/расширений и отнимает её у тех, кто в бюджете уложился. В E34S53
+ * это означало, что контроллер получал втрое меньше прогресса, чем мог.
+ *
+ * Лишние рабочие не берут энергию из структур: они дорабатывают тот запас,
+ * который уже у них в рюкзаке, и не мешают остальным. Пометка стабильна
+ * (сортировка по имени), чтобы крипы не «переизбирались» каждый тик.
+ *
+ * @param room       Комната.
+ * @param homeCreeps Крипы этой комнаты.
+ * @param spawnOrder План спавна: пары `[роль, целевое количество]`.
+ */
+function markExcessWorkers(
+    room: Room,
+    homeCreeps: Creep[],
+    spawnOrder: [RoleKey, number][]
+): void {
+    const allowed = new Map<string, number>();
+
+    for (const [role, target] of spawnOrder) {
+        allowed.set(role, target);
+    }
+
+    const byRole = new Map<string, Creep[]>();
+
+    for (const creep of homeCreeps) {
+        const role = creep.memory.role;
+
+        if (!allowed.has(role)) {
+            continue;
+        }
+
+        const list = byRole.get(role) || [];
+        list.push(creep);
+        byRole.set(role, list);
+    }
+
+    for (const [role, list] of byRole) {
+        const limit = allowed.get(role) ?? list.length;
+
+        list.sort((a, b) => (a.name < b.name ? -1 : 1));
+
+        for (let i = 0; i < list.length; i++) {
+            const creep = list[i] as Creep;
+
+            if (i >= limit) {
+                creep.memory._excess = true;
+            } else {
+                delete creep.memory._excess;
+            }
         }
     }
 }

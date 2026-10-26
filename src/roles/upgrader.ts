@@ -76,6 +76,12 @@ function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
  */
 function runDonorMode(creep: Creep): void {
     if (creep.store[RESOURCE_ENERGY] === 0) {
+        if (creep.memory._excess) {
+            // Лишний рабочий не забирает энергию: она нужна тем, кто в
+            // бюджете комнаты.
+            return;
+        }
+
         const donor = findEnergyDonor(creep);
 
         if (!donor) {
