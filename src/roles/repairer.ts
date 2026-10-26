@@ -13,9 +13,12 @@
 import {
     harvestEnergy,
     findClosestSource,
+    findEnergyDonor,
     findRepairTarget,
     repairAt,
-    upgradeRoomController
+    upgradeRoomController,
+    isSourceSaturated,
+    withdrawEnergy
 } from '../utilities';
 
 /**
@@ -40,6 +43,42 @@ export function run(creep: Creep): void {
     }
 
     if (creep.memory.repairing) {
+        const repairTarget = findRepairTarget(creep);
+
+        if (repairTarget) {
+            repairAt(creep, repairTarget, {
+                visualizePathStyle: { stroke: '#ffffff' }
+            });
+
+            return;
+        }
+
+        upgradeRoomController(creep, {
+            visualizePathStyle: { stroke: '#ffffff' }
+        });
+
+        return;
+    }
+
+    if (isSourceSaturated(creep.room)) {
+        // Источник насыщен: клетки добычи отданы харвестерам, энергию для
+        // ремонта берём из спавна/расширений. Чиним тем, что уже есть.
+        if (energy === 0) {
+            const donor = findEnergyDonor(creep);
+
+            if (!donor) {
+                return;
+            }
+
+            withdrawEnergy(creep, donor, {
+                visualizePathStyle: { stroke: '#ffaa00' }
+            });
+
+            return;
+        }
+
+        creep.memory.repairing = true;
+
         const repairTarget = findRepairTarget(creep);
 
         if (repairTarget) {

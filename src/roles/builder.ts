@@ -15,9 +15,12 @@ import {
     harvestEnergy,
     findClosestSource,
     findConstructionSite,
+    findEnergyDonor,
     buildAt,
     blocksBirthRing,
-    upgradeRoomController
+    isSourceSaturated,
+    upgradeRoomController,
+    withdrawEnergy
 } from '../utilities';
 
 /**
@@ -78,6 +81,43 @@ export function run(creep: Creep): void {
     }
 
     if (creep.memory.building) {
+        const site = findConstructionSite(creep, isBuildable);
+
+        if (site) {
+            buildAt(creep, site, {
+                visualizePathStyle: { stroke: '#ffffff' }
+            });
+
+            return;
+        }
+
+        upgradeRoomController(creep, {
+            visualizePathStyle: { stroke: '#ffffff' }
+        });
+
+        return;
+    }
+
+    if (isSourceSaturated(creep.room)) {
+        // Источник насыщен: клетки добычи отданы харвестерам, энергию для
+        // стройки берём из спавна/расширений. Строим тем, что уже есть —
+        // ждать полного рюкзака незачем.
+        if (energy === 0) {
+            const donor = findEnergyDonor(creep);
+
+            if (!donor) {
+                return;
+            }
+
+            withdrawEnergy(creep, donor, {
+                visualizePathStyle: { stroke: '#ffaa00' }
+            });
+
+            return;
+        }
+
+        creep.memory.building = true;
+
         const site = findConstructionSite(creep, isBuildable);
 
         if (site) {

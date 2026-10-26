@@ -20,6 +20,7 @@ import {
     inspectSpawnRing,
     findFreeTileNear,
     blocksBirthRing,
+    collectHarvestSlots,
     type SpawnRingInfo
 } from './utilities';
 import * as log from './log';
@@ -85,6 +86,7 @@ export function run(room: Room): void {
     ensureSpawn(room);
     ensureSpawnAccessible(room);
     ensureSpawnRingReserve(room);
+    updateSourceSaturation(room, counts);
 
     const defense = planDefense(room);
     if (defense.enabled) {
@@ -495,6 +497,54 @@ function ensureSpawnRingReserve(room: Room): void {
             );
         }
     }
+}
+
+/**
+ * Определяет, насыщен ли источник комнаты: хватает ли клеток добычи на всех
+ * харвестеров.
+ *
+ * @remarks
+ * Клетки добычи — соседи источника, с которых можно добывать. В обычной
+ * комнате их восемь, и хватает всем. Но источник может лежать на стене
+ * рельефа, и тогда проходимых соседей у него — три (в E34S53 именно так:
+ * источник (19,23) стоит на стене, доступны только (20,22), (20,23) и
+ * (20,24)).
+ *
+ * Если клеток не хватает, те, кто тоже умеет добывать (апгрейдер, билдер,
+ * ремонтник), вытесняют харвестеров с клеток добычи — и колония остаётся
+ * без энергии: харвестеры стоят с пустым рюкзаком, а весь источник уходит
+ * в контроллер. Поэтому при насыщении остальные роли берут энергию из
+ * спавна/расширений, а клетки добычи остаются за харвестерами.
+ *
+ * Проверка идёт раз в {@link EXTENSION_CHECK_INTERVAL} тиков.
+ *
+ * @param room   Комната.
+ * @param counts Состав ролей комнаты (`роль → количество`).
+ */
+function updateSourceSaturation(room: Room, counts: Record<string, number>): void {
+    if (
+        room.memory._sourceCheckTick &&
+        Game.time - room.memory._sourceCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._sourceCheckTick = Game.time;
+
+    const harvesters = counts[ROLE.HARVESTER] || 0;
+
+    if (harvesters === 0) {
+        room.memory._sourceSaturated = false;
+        return;
+    }
+
+    let slots = 0;
+
+    for (const source of room.find(FIND_SOURCES)) {
+        slots += collectHarvestSlots(room, source).length;
+    }
+
+    room.memory._sourceSaturated = slots > 0 && harvesters >= slots;
 }
 
 /**
