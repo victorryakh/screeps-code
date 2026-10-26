@@ -112,12 +112,10 @@ declare global {
         _spawnCheckTick?: number;
         /** Тик последней проверки насыщенности источника (см. `updateSourceSaturation`). */
         _sourceCheckTick?: number;
-        /**
-         * Сколько энергии комнаты нельзя забирать из структур: столько стоит
-         * следующий крип, которого бот собирается завести (см.
-         * `updateDonorReserve`).
-         */
-        _donorReserve?: number;
+        /** Тик последнего пересчёта бюджета энергии комнаты (см. `computeWorkBudget`). */
+        _budgetCheckTick?: number;
+        /** Сколько энергии в тик комната может тратить на работу (см. `computeWorkBudget`). */
+        _workBudget?: number;
         /**
          * `true`, если клеток добычи не хватает на всех харвестеров комнаты.
          *

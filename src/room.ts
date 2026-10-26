@@ -8,13 +8,15 @@
 
 import {
     ROLE,
-    type RoleKey,
     WALL_TERRAIN,
     EXTENSION_CHECK_INTERVAL,
     SPAWN_CLEAR_RADIUS,
     SPAWN_BIRTH_TILES_MIN,
     SEALED_SPAWN_HEAL_DELAY,
-    SEALED_SPAWN_HEAL_RETRY
+    SEALED_SPAWN_HEAL_RETRY,
+    HARVEST_RATE_PER_WORK,
+    HARVEST_EFFICIENCY,
+    CREEP_LIFE_TICKS
 } from './constants';
 import { trySpawn } from './spawn';
 import {
@@ -23,7 +25,6 @@ import {
     blocksBirthRing,
     collectHarvestSlots,
     bodyCost,
-    bodyFor,
     type SpawnRingInfo
 } from './utilities';
 import * as log from './log';
@@ -96,9 +97,7 @@ export function run(room: Room): void {
         runTowers(room, defense);
     }
 
-    const spawnOrder = planSpawnOrder(room, counts);
-
-    updateDonorReserve(room, spawnOrder, counts);
+    const spawnOrder = planSpawnOrder(room, counts, computeWorkBudget(room, counts));
 
     for (const pair of spawnOrder) {
         const role = pair[0];
@@ -505,38 +504,53 @@ function ensureSpawnRingReserve(room: Room): void {
 }
 
 /**
- * Считает, сколько энергии комнате нельзя забирать «на сторону»: ровно
- * столько, сколько стоит следующий крип, которого бот собирается завести.
+ * Считает, сколько энергии в тик комната может тратить на работу: апгрейд
+ * контроллера, стройку, ремонт.
  *
  * @remarks
- * Роли, которые берут энергию из спавна/расширений (см.
- * {@link isSourceSaturated}), не должны высасывать комнату в ноль: `spawnCreep`
- * оплачивается из энергии структур комнаты, а крипы в Screeps умирают от
- * старости на 1500-м тике. Если энергии не хватит на замену, колония
- * начнёт терять роли одна за другой.
+ * Бюджет = доход от добычи − стоимость замены умирающих крипов.
  *
- * Пока бот не собирается никого заводить, резерв равен нулю — энергию можно
- * забирать всю.
+ * - Доход: клеток добычи у источника может быть всего три (если источник лежит
+ *   на стене рельефа), и каждый харвестер добывает по 2 энергии за тик на
+ *   1 WORK, но часть энергии теряется на дороге до спавна и обратно.
+ * - Крипы умирают от старости на 1500-м тике, и замену нужно оплатить из
+ *   того же дохода — иначе колония постепенно теряет роли.
  *
- * @param room       Комната.
- * @param spawnOrder План спавна: пары `[роль, целевое количество]`.
- * @param counts     Текущий состав ролей комнаты.
+ * Если бюджет не считать, бот будет планировать состав по одному только RCL
+ * и заведёт в комнату больше рабочих крипов, чем она может прокормить: в
+ * E34S53 доход ~4 энергии в тик, а состав RCL 3 (3 апгрейдера + 2 билдера +
+ * 1 ремонтник) требует ~8.
+ *
+ * @param room   Комната.
+ * @param counts Текущий состав ролей комнаты.
+ * @returns Бюджет энергии в тик.
  */
-function updateDonorReserve(
-    room: Room,
-    spawnOrder: [RoleKey, number][],
-    counts: Record<string, number>
-): void {
-    let reserve = 0;
-
-    for (const [role, target] of spawnOrder) {
-        if ((counts[role] || 0) < target) {
-            reserve = bodyCost(bodyFor(role));
-            break;
-        }
+function computeWorkBudget(room: Room, counts: Record<string, number>): number {
+    if (
+        room.memory._budgetCheckTick &&
+        Game.time - room.memory._budgetCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return room.memory._workBudget ?? 0;
     }
 
-    room.memory._donorReserve = reserve;
+    room.memory._budgetCheckTick = Game.time;
+
+    const source = room.find(FIND_SOURCES)[0];
+    const slots = source ? collectHarvestSlots(room, source).length : 0;
+    const harvesters = counts[ROLE.HARVESTER] || 0;
+
+    const income =
+        Math.min(slots, harvesters) * HARVEST_RATE_PER_WORK * HARVEST_EFFICIENCY;
+
+    let churn = 0;
+
+    for (const creep of room.find(FIND_MY_CREEPS)) {
+        churn += bodyCost(creep.body.map((part) => part.type)) / CREEP_LIFE_TICKS;
+    }
+
+    room.memory._workBudget = Math.max(0, income - churn);
+
+    return room.memory._workBudget;
 }
 
 /**

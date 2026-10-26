@@ -144,6 +144,13 @@ function near(a, b) {
     return Math.abs(a.x - b.x) <= 1 && Math.abs(a.y - b.y) <= 1;
 }
 
+const BODIES = {
+    harvester: ['work', 'carry', 'move'],
+    upgrader: ['work', 'work', 'carry', 'move'],
+    builder: ['work', 'carry', 'carry', 'move', 'move'],
+    repairer: ['work', 'carry', 'move', 'move']
+};
+
 function makeCreep(x, y, role, energy) {
     const store = {
         energy: energy || 0,
@@ -159,6 +166,7 @@ function makeCreep(x, y, role, energy) {
         hitsMax: 300,
         fatigue: 0,
         store,
+        body: (BODIES[role] || BODIES.harvester).map((type) => ({ type, hits: 100 })),
         memory: { role, homeRoom: 'E34S53' },
         room: null,
         actions: [],
@@ -222,10 +230,27 @@ function makeRoom(opts) {
         my: true, level: 3, progress: 0, progressTotal: 600000, safeMode: 0,
         ticksToDowngrade: 100000, reservation: null, upgradeBlocked: false, pos: pos(17, 24)
     };
+    const spawnAttempts = [];
     const spawn = {
         name: 'Spawn1', structureType: C.STRUCTURE_SPAWN, pos: pos(19, 26), my: true,
         store: { energy: opts.spawnEnergy === undefined ? 300 : opts.spawnEnergy },
-        spawning: null, room: null, spawnCreep() { return -4; }
+        spawning: null, room: null,
+        spawnCreep(body, name, opts) {
+            const cost = body.reduce((sum, part) => sum + ({ move: 50, work: 100, carry: 50 }[part] || 0), 0);
+            if (room.energyAvailable < cost) {
+                return -6; // ERR_NOT_ENOUGH_ENERGY
+            }
+            spawnAttempts.push({ name, role: opts && opts.memory ? opts.memory.role : '?', cost });
+            spawn.store.energy -= cost;
+            const role = opts && opts.memory ? opts.memory.role : 'harvester';
+            const creep = makeCreep(19, 25, role, 0);
+            creep.name = name;
+            creep.body = body.map((type) => ({ type, hits: 100 }));
+            creep.memory = (opts && opts.memory) || creep.memory;
+            creep.room = room;
+            creeps.push(creep);
+            return OK;
+        }
     };
     const structures = [controller, spawn, ...extensions];
 
@@ -269,7 +294,7 @@ function makeRoom(opts) {
     source.room = room;
     currentRoom = room;
 
-    return { room, spawn, controller, extensions, sites, source, creeps };
+    return { room, spawn, controller, extensions, sites, source, creeps, spawnAttempts };
 }
 
 let world = null;
@@ -404,29 +429,35 @@ function actions(creep, kind) {
 }
 
 
-// --- Scenario 5: the reserve for the next creep is respected ---------------
-// The spawn pays for new creeps and creeps die of old age, so the room must
-// keep enough energy for the creep the bot is about to spawn. Here the next
-// creep is an upgrader (300 energy) and the room has less than that.
+// --- Scenario 5: a worker takes only what it can spend --------------------
+// The room's energy is needed for new creeps as well (creeps die of old age),
+// so a worker must not grab it all at once.
 {
     const sim = makeRoom({
-        spawnEnergy: 250,
+        spawnEnergy: 300,
+        extensions: [[21, 26, 50]],
         creeps: [
             [21, 21, 'harvester', 0],
             [21, 22, 'harvester', 0],
             [21, 23, 'harvester', 0],
-            [20, 27, 'upgrader', 0]
+            [21, 27, 'upgrader', 0]
         ]
     });
     runTicks(sim, 1);
     const upgrader = sim.creeps.find((c) => c.memory.role === 'upgrader');
     const withdraws = actions(upgrader, 'withdraw');
-    check('the upgrader does not take the energy reserved for the next spawn',
-        withdraws.length === 0 && sim.room.energyAvailable === 250,
-        `withdraw=${JSON.stringify(withdraws)} room energy=${sim.room.energyAvailable}`);
+    check('the worker takes energy from a structure',
+        withdraws.length > 0,
+        JSON.stringify(withdraws));
+    check('the worker takes only a small amount at a time',
+        withdraws.every((w) => w[3] === undefined || w[3] <= 10),
+        JSON.stringify(withdraws));
 }
 
-// --- Scenario 5b: the surplus above the reserve is available ---------------
+// --- Scenario 5b: the composition fits the room's income ------------------
+// RCL 3 asks for 3 upgraders + 2 builders + 1 repairer. In a room with three
+// harvest slots that is more than the room can feed, so the bot must ask for
+// fewer.
 {
     const sim = makeRoom({
         spawnEnergy: 300,
@@ -434,19 +465,18 @@ function actions(creep, kind) {
         creeps: [
             [21, 21, 'harvester', 0],
             [21, 22, 'harvester', 0],
-            [21, 23, 'harvester', 0],
-            [20, 27, 'upgrader', 0]
+            [21, 23, 'harvester', 0]
         ]
     });
-    runTicks(sim, 1);
-    const upgrader = sim.creeps.find((c) => c.memory.role === 'upgrader');
-    const withdraws = actions(upgrader, 'withdraw');
-    check('the upgrader takes the surplus above the reserve',
-        withdraws.length > 0,
-        JSON.stringify(withdraws));
-    check('the reserve for the next spawn is still in the room',
-        sim.room.energyAvailable >= 300,
-        `room energy=${sim.room.energyAvailable}`);
+    runTicks(sim, 6);
+    const roles = sim.spawnAttempts.map((a) => a.role);
+    check('the bot does not plan more workers than the room can feed',
+        roles.filter((r) => r === 'upgrader').length <= 1 &&
+        roles.filter((r) => r === 'builder').length <= 1,
+        JSON.stringify(roles));
+    check('the bot still plans a worker for the controller',
+        roles.includes('upgrader'),
+        JSON.stringify(roles));
 }
 
 // --- Scenario 6: energy in hand is used, not hoarded ------------------------

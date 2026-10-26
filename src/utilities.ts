@@ -5,7 +5,7 @@ import {
     BIRTH_BLOCKING_TYPES,
     WALL_TERRAIN,
     UPGRADE_RANGE,
-    DONOR_ENERGY_RESERVE
+    DONOR_WITHDRAW_QUOTA
 } from './constants';
 import { EXPANSION } from './strategy';
 
@@ -870,11 +870,10 @@ export function findEnergyDonor(creep: Creep): AnyStoreStructure | null {
  * к ней через {@link moveCached}.
  *
  * @remarks
- * Забирается не больше, чем в комнате есть энергии сверх резерва: резерва
- * хватает на оплату того крипа, которого бот собирается завести
- * (`room.memory._donorReserve`, см. `updateDonorReserve`). Без этого колония
- * не сможет заменить умерших крипов: `spawnCreep` берёт энергию из структур
- * комнаты, а крипы в Screeps умирают от старости на 1500-м тике.
+ * Забирается не больше {@link DONOR_WITHDRAW_QUOTA} — ровно на несколько
+ * тиков работы. Иначе крип забирает энергию, которая ещё нужна колонии: на
+ * спавн заменяющегося крипа (крипы умирают от старости на 1500-м тике) или
+ * другому рабочему крипу.
  *
  * @param creep  Крип, который берёт энергию.
  * @param donor  Спавн или расширение с энергией. `null`/`undefined`
@@ -891,18 +890,15 @@ export function withdrawEnergy(
         return ERR_INVALID_TARGET;
     }
 
-    const reserve = creep.room.memory._donorReserve ?? DONOR_ENERGY_RESERVE;
-    const budget = creep.room.energyAvailable - reserve;
-
-    if (budget <= 0) {
-        return ERR_NOT_ENOUGH_ENERGY;
-    }
-
     const amount = Math.min(
         creep.store.getFreeCapacity(RESOURCE_ENERGY),
         donor.store.energy,
-        budget
+        DONOR_WITHDRAW_QUOTA
     );
+
+    if (amount <= 0) {
+        return ERR_NOT_ENOUGH_RESOURCES;
+    }
 
     const result = creep.withdraw(donor, RESOURCE_ENERGY, amount);
 

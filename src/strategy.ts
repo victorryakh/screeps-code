@@ -4,7 +4,8 @@ import {
     EXITS_CACHE_TTL,
     EXTENSION_PLAN_RADIUS,
     EXTENSION_CHECK_INTERVAL,
-    WALL_TERRAIN
+    WALL_TERRAIN,
+    UPGRADER_ENERGY_RATE
 } from './constants';
 import type { RoleKey } from './constants';
 
@@ -87,7 +88,8 @@ export function getRoomTargets(rcl: number): RoomTargets {
  */
 export function planSpawnOrder(
     room: Room,
-    counts: Record<string, number>
+    counts: Record<string, number>,
+    budget = Infinity
 ): [RoleKey, number][] {
     const rcl = room.controller?.level ?? 0;
     const targets = getRoomTargets(rcl);
@@ -96,7 +98,7 @@ export function planSpawnOrder(
         ? room.controller.ticksToDowngrade > DOWNGRADE_BUFFER_TICKS
         : true;
 
-    const upgraderTarget = canUpgrade
+    const upgraderTargetByRcl = canUpgrade
         ? targets.upgrader
         : Math.min(counts[ROLE.UPGRADER] || 0, 1);
 
@@ -106,6 +108,30 @@ export function planSpawnOrder(
     // состоянии временно поднимаем harvester на первое место — пока не
     // появится хотя бы один. Как только harvester >= 1, возвращаемся
     // к обычному порядку (upgrader → harvester → ...).
+    // Состав ограничен бюджетом комнаты: в комнате с тремя клетками добычи
+    // (источник на стене) RCL-цели недостижимы, и бот заводил бы больше
+    // рабочих крипов, чем комната может прокормить — энергии хватало бы
+    // только на замену умирающих, а работа стояла бы.
+    const upgraderTarget = Math.min(
+        upgraderTargetByRcl,
+        Math.max(1, Math.floor(budget / UPGRADER_ENERGY_RATE))
+    );
+
+    const builderTarget = Math.min(
+        targets.builder,
+        Math.max(0, Math.floor(budget - upgraderTarget * UPGRADER_ENERGY_RATE))
+    );
+
+    const repairerTarget = Math.min(
+        targets.repairer,
+        Math.max(
+            0,
+            Math.floor(
+                budget - upgraderTarget * UPGRADER_ENERGY_RATE - builderTarget
+            )
+        )
+    );
+
     const harvesterCount = counts[ROLE.HARVESTER] || 0;
 
     // Харвестер идёт первым всегда, пока их нет. Тело upgrader-а стоит
@@ -121,16 +147,16 @@ export function planSpawnOrder(
         return [
             [ROLE.HARVESTER, targets.harvester],
             [ROLE.UPGRADER, upgraderTarget],
-            [ROLE.BUILDER, targets.builder],
-            [ROLE.REPAIRER, targets.repairer]
+            [ROLE.BUILDER, builderTarget],
+            [ROLE.REPAIRER, repairerTarget]
         ];
     }
 
     return [
         [ROLE.UPGRADER, upgraderTarget],
         [ROLE.HARVESTER, targets.harvester],
-        [ROLE.BUILDER, targets.builder],
-        [ROLE.REPAIRER, targets.repairer]
+        [ROLE.BUILDER, builderTarget],
+        [ROLE.REPAIRER, repairerTarget]
     ];
 }
 
