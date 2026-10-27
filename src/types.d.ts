@@ -123,6 +123,18 @@ declare global {
         _budgetCheckTick?: number;
         /** Сколько энергии в тик комната может тратить на работу (см. `computeWorkBudget`). */
         _workBudget?: number;
+        /** Тик последнего замера энергии в источнике комнаты. */
+        _incomeSampleTick?: number;
+        /** Энергия в источнике на момент последнего замера. */
+        _incomeSampleEnergy?: number;
+        /**
+         * Измеренный доход комнаты в энергиях за тик.
+         *
+         * @remarks
+         * Значение, которому доверяет `computeWorkBudget`: модельный расчёт
+         * по числу клеток добычи завышал доход втрое (см. `updateIncomeRate`).
+         */
+        _incomeRate?: number;
         /**
          * `true`, если клеток добычи не хватает на всех харвестеров комнаты.
          *

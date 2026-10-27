@@ -17,7 +17,8 @@ import {
     SEALED_SPAWN_HEAL_RETRY,
     HARVEST_RATE_PER_WORK,
     HARVEST_EFFICIENCY,
-    CREEP_LIFE_TICKS
+    CREEP_LIFE_TICKS,
+    INCOME_SAMPLE_INTERVAL
 } from './constants';
 import { trySpawn } from './spawn';
 import {
@@ -92,6 +93,7 @@ export function run(room: Room): void {
     ensureSpawnAccessible(room);
     ensureSpawnRingReserve(room);
     updateSourceSaturation(room, counts);
+    updateIncomeRate(room);
 
     const defense = planDefense(room);
     if (defense.enabled) {
@@ -314,6 +316,18 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
         return;
     }
 
+    // Клетки добычи — неприкосновенны: расширение на такой клетке убирает
+    // её из числа доступных источнику. В E34S53 клеток добычи всего три
+    // (источник лежит на стене), и потеря любой из них — минус треть
+    // дохода комнаты. Поэтому такие клетки исключаются из кандидатов.
+    const harvestSlots = new Set<string>();
+
+    for (const source of room.find(FIND_SOURCES)) {
+        for (const slot of collectHarvestSlots(room, source)) {
+            harvestSlots.add(`${slot.x},${slot.y}`);
+        }
+    }
+
     const terrain = room.getTerrain();
 
     const adjacentSet = new Set<string>();
@@ -364,6 +378,13 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
                 }
 
                 if (terrain.get(x, y) === layout.wallTerrain) {
+                    continue;
+                }
+
+                // Клетки добычи не отдаём под расширения: источник в этой
+                // комнате добывает лишь с трёх клеток, и потеря одной — минус
+                // треть дохода.
+                if (harvestSlots.has(`${x},${y}`)) {
                     continue;
                 }
 
@@ -583,6 +604,12 @@ function markExcessWorkers(
  * E34S53 доход ~4 энергии в тик, а состав RCL 3 (3 апгрейдера + 2 билдера +
  * 1 ремонтник) требует ~8.
  *
+ * Доход берётся не из модели, а из измерения (см. {@link updateIncomeRate}):
+ * модель считает, что крип копает всегда, и в геометрии E34S53 (источник в
+ * стенном кармане, три клетки добычи на болоте, доставка через десять клеток
+ * в обход стены) завышала доход втрое — бот держал рабочих, которых комната
+ * не прокармливала, и выедал запас.
+ *
  * @param room   Комната.
  * @param counts Текущий состав ролей комнаты.
  * @returns Бюджет энергии в тик.
@@ -601,8 +628,22 @@ function computeWorkBudget(room: Room, counts: Record<string, number>): number {
     const slots = source ? collectHarvestSlots(room, source).length : 0;
     const harvesters = counts[ROLE.HARVESTER] || 0;
 
-    const income =
+    // Модельный доход: клетки добычи × 2 энергии за тик на 1 WORK × потери на
+    // доставке. Это верхняя граница, а не оценка.
+    const modelIncome =
         Math.min(slots, harvesters) * HARVEST_RATE_PER_WORK * HARVEST_EFFICIENCY;
+
+    // Реальный доход: сколько энергии харвестеры фактически принесли в
+    // структуры за последний интервал (см. `updateIncomeRate`).
+    //
+    // Модель завышала доход втрое: она не учитывала ни время на дорогу, ни
+    // то, что в E34S53 все три клетки добычи лежат на болоте, ни то, что
+    // доставка идёт через десять клеток в обход стенного блока. Бот
+    // считал, что у комнаты есть 4.2 энергии в тик, и держал апгрейдера с
+    // билдером (3 энергии в тик) — комната жила в долг и выедала запас.
+    const measuredIncome = room.memory._incomeRate ?? 0;
+
+    const income = measuredIncome > 0 ? measuredIncome : modelIncome;
 
     let churn = 0;
 
@@ -613,6 +654,68 @@ function computeWorkBudget(room: Room, counts: Record<string, number>): number {
     room.memory._workBudget = Math.max(0, income - churn);
 
     return room.memory._workBudget;
+}
+
+/**
+ * Меряет реальный доход комнаты: сколько энергии в тик комната добывает.
+ *
+ * @remarks
+ * Оценка «сколько может добыть комната» по геометрии (число клеток добычи ×
+ * 2 энергии за тик) систематически завышает реальность: крип половину времени
+ * идёт, а не копает. В E34S53 модель давала 4.2 энергии в тик, реально
+ * приходило 1.4 — и именно этот разрыв съедал запас комнаты.
+ *
+ * Поэтому доход измеряется по источнику: сколько энергии из него забрали за
+ * интервал. Это ровно тот темп, с которым комната получает энергию, —
+ * независимо от рельефа, геометрии и того, сколько крип тратит на дорогу.
+ *
+ * Два важных свойства движка, из-за которых измерение именно такое:
+ *
+ * - Источник регенерирует **одним куском** (сразу до полного запаса), а не
+ *   по 1 энергии за тик (`processor/intents/sources/tick.js`). Значит, скачок
+ *   энергии вверх — это регенерация, а не добыча: такие замеры отбрасываются.
+ * - Содержимое `creep.store` обновляется движком в конце тика, поэтому
+ *   переданную энергию нельзя посчитать как разницу `store` внутри одного
+ *   тика — она всегда нулевая.
+ *
+ * @param room Комната.
+ */
+function updateIncomeRate(room: Room): void {
+    const source = room.find(FIND_SOURCES)[0];
+
+    if (!source) {
+        return;
+    }
+
+    const now = Game.time;
+    const lastTick = room.memory._incomeSampleTick;
+    const lastEnergy = room.memory._incomeSampleEnergy;
+
+    if (lastTick === undefined || lastEnergy === undefined) {
+        room.memory._incomeSampleTick = now;
+        room.memory._incomeSampleEnergy = source.energy;
+        return;
+    }
+
+    if (now - lastTick < INCOME_SAMPLE_INTERVAL) {
+        return;
+    }
+
+    const drained = lastEnergy - source.energy;
+
+    room.memory._incomeSampleTick = now;
+    room.memory._incomeSampleEnergy = source.energy;
+
+    // Энергия в источнике не уменьшилась: либо ничего не добывали, либо
+    // сработала регенерация. Такой замер ничего не говорит о доходе.
+    if (drained <= 0) {
+        return;
+    }
+
+    const rate = drained / (now - lastTick);
+    const previous = room.memory._incomeRate ?? 0;
+
+    room.memory._incomeRate = previous > 0 ? previous * 0.5 + rate * 0.5 : rate;
 }
 
 /**

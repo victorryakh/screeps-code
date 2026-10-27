@@ -104,7 +104,16 @@ export function bodyCost(body: BodyPartConstant[]): number {
 export function bodyFor(role: string): BodyPartConstant[] {
     switch (role) {
         case ROLE.HARVESTER:
-            return [WORK, CARRY, MOVE];
+            // Тело харвестера подобрано под реальную геометрию комнаты:
+            // 2 CARRY (рюкзак на 100 энергии — вдвое меньше походов) и
+            // 2 MOVE (на болоте один MOVE даёт 0.4 клетки за тик, два — 0.8).
+            //
+            // Прежнее тело [WORK, CARRY, MOVE] было «бегуном»: рюкзак на 50 и
+            // один MOVE. В комнате, где источник лежит в стенном кармане и
+            // доставка энергии занимает ~10 клеток по болоту, крип проводил в
+            // дороге две трети жизни, и источник давал ~1.4 энергии за тик
+            // вместо расчётных 4.2.
+            return [WORK, CARRY, CARRY, MOVE, MOVE];
 
         case ROLE.UPGRADER:
             return [WORK, WORK, CARRY, MOVE];
