@@ -192,7 +192,23 @@ export function run(creep: Creep): void {
             if (creep.memory._excess) {
                 // Лишний рабочий не берёт энергию из структур: она нужна
                 // тем, кто в бюджете комнаты. Но и стоять на клетке добычи
-                // он не должен — она отнимает доход у харвестеров.
+                // или клетке рождения он не должен — они отнимают доход у
+                // харвестеров и закрывают спавн. Ждём у стройки: там клетка
+                // заведомо свободна.
+                const site = findConstructionSite(creep, isBuildable);
+
+                if (site) {
+                    const spot = ensureBuildSpot(creep, site);
+
+                    if (spot && !creep.pos.isEqualTo(spot)) {
+                        moveCached(creep, spot, {
+                            visualizePathStyle: { stroke: '#ffffff' }
+                        });
+
+                        return;
+                    }
+                }
+
                 stepOffHarvestSlots(creep);
                 return;
             }
