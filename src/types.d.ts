@@ -63,6 +63,18 @@ declare global {
             roomName: string;
         };
         /**
+         * Клетка, с которой крип строит construction site (см.
+         * `findBuildSpot`). Кэш, чтобы не искать место каждый тик. Выбирается
+         * так, чтобы не занимать клетку добычи и не закрывать клетку
+         * рождения.
+         */
+        _buildSpot?: {
+            x: number;
+            y: number;
+            roomName: string;
+            siteId: string;
+        };
+        /**
          * Кэш маршрута, используемый {@link moveCached} для экономии CPU.
          * Содержит путь, конечную точку и момент последнего вычисления; при
          * совпадении координат и `Game.time - time < reusePath` путь

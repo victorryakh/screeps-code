@@ -16,10 +16,14 @@ import {
     findClosestSource,
     findConstructionSite,
     findEnergyDonor,
+    findBuildSpot,
+    findFreeTileNear,
+    collectHarvestSlotKeys,
     buildAt,
     isSourceSaturated,
     upgradeRoomController,
-    withdrawEnergy
+    withdrawEnergy,
+    moveCached
 } from '../utilities';
 
 /**
@@ -57,6 +61,79 @@ function isBuildable(site: ConstructionSite): boolean {
 }
 
 /**
+ * Запоминает клетку, с которой выгодно строить стройплощадку.
+ *
+ * @remarks
+ * Клетка кэшируется, чтобы билдер не пересчитывал её каждый тик, но
+ * пересчитывается, если её занял другой крип или площадка сменилась.
+ *
+ * @param creep Крип-билдер.
+ * @param site  Стройплощадка, которую нужно достроить.
+ * @returns Клетка для стройки или `null`, если подходящей нет.
+ */
+function ensureBuildSpot(creep: Creep, site: ConstructionSite): RoomPosition | null {
+    const room = creep.room;
+    const cached = creep.memory._buildSpot;
+
+    if (
+        cached &&
+        cached.roomName === room.name &&
+        cached.siteId === site.id
+    ) {
+        const busy = room.find(FIND_CREEPS, {
+            filter: (c) =>
+                c.name !== creep.name && c.pos.x === cached.x && c.pos.y === cached.y
+        });
+
+        if (busy.length === 0) {
+            return new RoomPosition(cached.x, cached.y, cached.roomName);
+        }
+    }
+
+    const spot = findBuildSpot(creep, site);
+
+    if (spot) {
+        creep.memory._buildSpot = {
+            x: spot.x,
+            y: spot.y,
+            roomName: spot.roomName,
+            siteId: site.id
+        };
+    } else {
+        delete creep.memory._buildSpot;
+    }
+
+    return spot;
+}
+
+/**
+ * Уводит крипа с клетки добычи, если он на ней оказался.
+ *
+ * @remarks
+ * Клетки добычи — конечный ресурс. В E34S53 их три, и билдер, вставший на
+ * одну из них, отнимал у харвестеров треть дохода комнаты, стоя там без
+ * дела. Клетка добычи также не место для ожидания.
+ *
+ * @param creep Крип.
+ */
+function stepOffHarvestSlots(creep: Creep): void {
+    const room = creep.room;
+    const slots = collectHarvestSlotKeys(room);
+
+    if (!slots.has(`${creep.pos.x},${creep.pos.y}`)) {
+        return;
+    }
+
+    const spot = findFreeTileNear(room, creep.pos, slots);
+
+    if (spot) {
+        moveCached(creep, spot, {
+            visualizePathStyle: { stroke: '#ffaa00' }
+        });
+    }
+}
+
+/**
  * Выполняет один шаг builder-а. См. описание модуля.
  *
  * @param creep Крип с `role === ROLE.BUILDER`.
@@ -83,6 +160,16 @@ export function run(creep: Creep): void {
         const site = findConstructionSite(creep, isBuildable);
 
         if (site) {
+            const spot = ensureBuildSpot(creep, site);
+
+            if (spot && !creep.pos.isEqualTo(spot)) {
+                moveCached(creep, spot, {
+                    visualizePathStyle: { stroke: '#ffffff' }
+                });
+
+                return;
+            }
+
             buildAt(creep, site, {
                 visualizePathStyle: { stroke: '#ffffff' }
             });
@@ -104,7 +191,9 @@ export function run(creep: Creep): void {
         if (energy === 0) {
             if (creep.memory._excess) {
                 // Лишний рабочий не берёт энергию из структур: она нужна
-                // тем, кто в бюджете комнаты.
+                // тем, кто в бюджете комнаты. Но и стоять на клетке добычи
+                // он не должен — она отнимает доход у харвестеров.
+                stepOffHarvestSlots(creep);
                 return;
             }
 
@@ -126,6 +215,16 @@ export function run(creep: Creep): void {
         const site = findConstructionSite(creep, isBuildable);
 
         if (site) {
+            const spot = ensureBuildSpot(creep, site);
+
+            if (spot && !creep.pos.isEqualTo(spot)) {
+                moveCached(creep, spot, {
+                    visualizePathStyle: { stroke: '#ffffff' }
+                });
+
+                return;
+            }
+
             buildAt(creep, site, {
                 visualizePathStyle: { stroke: '#ffffff' }
             });

@@ -512,13 +512,69 @@ function actions(creep, kind) {
     runTicks(sim, 1);
 
     const builder = sim.creeps[0];
-    const targets = builder.actions
-        .filter((a) => a[0] === 'build' || a[0] === 'build-fail')
-        .map((a) => `${a[1]},${a[2]}`);
+    const spot = builder.memory._buildSpot;
 
     check('the builder targets the extension site standing in the birth ring',
-        targets.includes('20,25'),
-        JSON.stringify(targets));
+        spot && Math.max(Math.abs(spot.x - 20), Math.abs(spot.y - 25)) === 1,
+        JSON.stringify(spot));
+}
+
+// --- Scenario 6: an idle builder does not squat on a harvest tile -----------
+// The harvest tiles are the scarcest resource of the room: three of them,
+// and a builder standing on one takes a third of the income away from the
+// harvesters.
+{
+    const sim = makeRoom({
+        sites: [[20, 25]],
+        extensions: [[21, 26, 50]],
+        creeps: [
+            [20, 24, 'builder', 0],
+            [21, 21, 'harvester', 0],
+            [21, 22, 'harvester', 0],
+            [21, 23, 'harvester', 0]
+        ]
+    });
+
+    // A starving room: the budget does not cover a builder, so it is excess
+    // and must not take energy from the room.
+    sim.room.memory._incomeRate = 1.4;
+    sim.room.memory._budgetCheckTick = 0;
+
+    runTicks(sim, 1);
+
+    const builder = sim.creeps[0];
+    const moves = actions(builder, 'moveTo').map((m) => `${m[1]},${m[2]}`);
+
+    check('an idle builder leaves the harvest tile',
+        moves.length > 0 && !moves.includes('20,24'),
+        JSON.stringify(moves));
+    check('the excess builder does not take energy from the room',
+        actions(builder, 'withdraw').length === 0 && actions(builder, 'withdraw-fail').length === 0,
+        JSON.stringify(builder.actions));
+}
+
+// --- Scenario 7: the builder picks a spot that is not a harvest tile -------
+{
+    const sim = makeRoom({
+        sites: [[20, 25]],
+        creeps: [[21, 24, 'builder', 100]]
+    });
+
+    runTicks(sim, 1);
+
+    const builder = sim.creeps[0];
+    const builds = actions(builder, 'build').map((m) => `${m[1]},${m[2]}`);
+    const spot = builder.memory._buildSpot;
+
+    check('the builder builds the site in the birth ring',
+        builds.includes('20,25'),
+        JSON.stringify(builds));
+    check('the build spot is not a harvest tile',
+        spot && !['20,22', '20,23', '20,24'].includes(`${spot.x},${spot.y}`),
+        JSON.stringify(spot));
+    check('the build spot is not a birth tile either',
+        spot && !['19,25', '20,26', '19,27', '18,26', '18,27', '20,25', '20,27', '18,25'].includes(`${spot.x},${spot.y}`),
+        JSON.stringify(spot));
 }
 
 const failed = results.filter((r) => !r.ok);

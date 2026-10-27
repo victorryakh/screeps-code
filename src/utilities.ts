@@ -647,6 +647,11 @@ export function findFreeTileNear(
         }
     }
 
+    // Стройплощадка — тоже препятствие: на её клетке крип стоять не может.
+    for (const c of room.find(FIND_CONSTRUCTION_SITES)) {
+        occupied.add(`${c.pos.x},${c.pos.y}`);
+    }
+
     for (const c of room.find(FIND_CREEPS)) {
         occupied.add(`${c.pos.x},${c.pos.y}`);
     }
@@ -914,6 +919,122 @@ export function withdrawEnergy(
     }
 
     return result;
+}
+
+/**
+ * Возвращает множество клеток добычи комнаты в виде ключей `"x,y"`.
+ *
+ * @remarks
+ * Клетки добычи — конечный ресурс: в комнате, где источник лежит на стене
+ * рельефа, их всего три. Крип, вставший на такую клетку, отнимает её у
+ * харвестеров, а это — треть дохода комнаты. Поэтому рабочие крипы
+ * (билдер, апгрейдер) не должны на них стоять.
+ *
+ * @param room Комната.
+ * @returns Множество занятых клеток добычи.
+ */
+export function collectHarvestSlotKeys(room: Room): Set<string> {
+    const keys = new Set<string>();
+
+    for (const source of room.find(FIND_SOURCES)) {
+        for (const slot of collectHarvestSlots(room, source)) {
+            keys.add(`${slot.x},${slot.y}`);
+        }
+    }
+
+    return keys;
+}
+
+/**
+ * Ищет клетку, с которой можно строить construction site.
+ *
+ * @remarks
+ * Строить можно только с соседней клетки (радиус действия — 1), и выбор
+ * клетки не случаен: билдер, вставший на клетку добычи, отнимает её у
+ * харвестеров, а вставший на клетку рождения — закрывает спавн. Поэтому
+ * предпочтение отдаётся свободной клетке, которая не является ни клеткой
+ * добычи, ни клеткой рождения.
+ *
+ * @param creep Крип-билдер.
+ * @param site  Стройплощадка, которую нужно достроить.
+ * @returns Подходящая клетка или `null`, если такой нет.
+ */
+export function findBuildSpot(creep: Creep, site: ConstructionSite): RoomPosition | null {
+    const room = creep.room;
+    const terrain = room.getTerrain();
+    const occupied = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        if (s.structureType === STRUCTURE_ROAD) {
+            continue;
+        }
+
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const c of room.find(FIND_CONSTRUCTION_SITES)) {
+        occupied.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    for (const c of room.find(FIND_CREEPS)) {
+        if (c.name === creep.name) {
+            continue;
+        }
+
+        occupied.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    for (const key of collectHarvestSlotKeys(room)) {
+        occupied.add(key);
+    }
+
+    const candidates: RoomPosition[] = [];
+
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            if (dx === 0 && dy === 0) {
+                continue;
+            }
+
+            const x = site.pos.x + dx;
+            const y = site.pos.y + dy;
+
+            if (x < 1 || x > 48 || y < 1 || y > 48) {
+                continue;
+            }
+
+            if (terrain.get(x, y) === WALL_TERRAIN) {
+                continue;
+            }
+
+            if (occupied.has(`${x},${y}`)) {
+                continue;
+            }
+
+            if (blocksBirthRing(room, x, y)) {
+                continue;
+            }
+
+            candidates.push(new RoomPosition(x, y, room.name));
+        }
+    }
+
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    candidates.sort((a, b) => {
+        const da = Math.max(Math.abs(a.x - creep.pos.x), Math.abs(a.y - creep.pos.y));
+        const db = Math.max(Math.abs(b.x - creep.pos.x), Math.abs(b.y - creep.pos.y));
+
+        if (da !== db) {
+            return da - db;
+        }
+
+        return a.x + a.y - (b.x + b.y);
+    });
+
+    return candidates[0] ?? null;
 }
 
 /**
