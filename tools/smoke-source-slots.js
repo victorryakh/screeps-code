@@ -113,6 +113,8 @@ const WALLS = new Set([
     '19,22', '19,23', '19,24'
 ]);
 
+const { installPathFinder } = require('./mock-pathfinder');
+
 const notifications = [];
 const createdSites = [];
 let tick = 1000;
@@ -223,7 +225,13 @@ function makeRoom(opts) {
     }));
     const extensions = (opts.extensions || []).map(([x, y, energy]) => ({
         structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, hits: 1000, hitsMax: 1000,
-        store: { energy: energy === undefined ? 0 : energy }, room: null
+        store: {
+            energy: energy === undefined ? 0 : energy,
+            getCapacity() { return 50; },
+            getFreeCapacity() { return 50 - this.energy; },
+            getUsedCapacity() { return this.energy; }
+        },
+        room: null
     }));
     const source = { type: 'source', pos: pos(19, 23), energy: 3000, room: null };
     const controller = {
@@ -233,7 +241,12 @@ function makeRoom(opts) {
     const spawnAttempts = [];
     const spawn = {
         name: 'Spawn1', structureType: C.STRUCTURE_SPAWN, pos: pos(19, 26), my: true,
-        store: { energy: opts.spawnEnergy === undefined ? 300 : opts.spawnEnergy },
+        store: {
+            energy: opts.spawnEnergy === undefined ? 300 : opts.spawnEnergy,
+            getCapacity() { return 300; },
+            getFreeCapacity() { return 300 - this.energy; },
+            getUsedCapacity() { return this.energy; }
+        },
         spawning: null, room: null,
         spawnCreep(body, name, opts) {
             const cost = body.reduce((sum, part) => sum + ({ move: 50, work: 100, carry: 50 }[part] || 0), 0);
@@ -293,6 +306,7 @@ function makeRoom(opts) {
     for (const c of creeps) c.room = room;
     source.room = room;
     currentRoom = room;
+    installPathFinder(() => currentRoom);
 
     return { room, spawn, controller, extensions, sites, source, creeps, spawnAttempts };
 }
