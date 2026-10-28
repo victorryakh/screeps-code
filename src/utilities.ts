@@ -266,16 +266,38 @@ export function transferEnergy(
  * перекрывает единственный проход, и цель перестаёт находиться вообще. Если
  * цель не найдена, харвестер вообще не может сдать энергию и уходит
  * апгрейдить контроллер вместо доставки.
+ *
+ * Среди подходящих структур выбирается та, что **вмещает весь груз**:
+ * расширение вмещает 50 энергии, а рюкзак харвестера — 100. Слив груз
+ * порциями удваивает число рейсов, а рейс — это и есть та самая дорога,
+ * которая ограничивает доход. Если места хватает только на часть груза,
+ * берём ближайшую структуру с любым свободным местом.
  */
 export function findEnergyTransferTarget(
     creep: Creep,
     types: StructureConstant[] = [STRUCTURE_SPAWN, STRUCTURE_EXTENSION]
 ): Structure | null {
-    return creep.pos.findClosestByPath(FIND_STRUCTURES, {
+    const room = creep.room;
+
+    const candidates = room.find(FIND_STRUCTURES, {
         filter: (s): s is AnyStoreStructure =>
             (types as StructureConstant[]).indexOf(s.structureType) !== -1 &&
             'store' in s &&
-            (s as AnyStoreStructure).store.getFreeCapacity(RESOURCE_ENERGY) > 0,
+            (s as AnyStoreStructure).store.getFreeCapacity(RESOURCE_ENERGY) > 0
+    });
+
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    const load = creep.store[RESOURCE_ENERGY];
+    const fits = candidates.filter(
+        (s) => s.store.getFreeCapacity(RESOURCE_ENERGY) >= load
+    );
+
+    const pool = fits.length > 0 ? fits : candidates;
+
+    return creep.pos.findClosestByPath(pool, {
         ignore: [FIND_CREEPS]
     });
 }
