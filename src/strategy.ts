@@ -1,11 +1,13 @@
 import {
     ROLE,
     DOWNGRADE_BUFFER_TICKS,
+    DELIVERY_STAGE_DOWNGRADE_MARGIN,
     EXITS_CACHE_TTL,
     EXTENSION_PLAN_RADIUS,
     EXTENSION_CHECK_INTERVAL,
     WALL_TERRAIN,
-    UPGRADER_ENERGY_RATE
+    UPGRADER_ENERGY_RATE,
+    BUILDER_ENERGY_RATE
 } from './constants';
 import type { RoleKey } from './constants';
 
@@ -85,11 +87,18 @@ export function getRoomTargets(rcl: number): RoomTargets {
  * Возвращает упорядоченный список решений «какую роль дозаказать».
  * Первый элемент списка — самый приоритетный.
  * Список обрезается так, чтобы в одном тике был заказан максимум один крип.
+ *
+ * @param room           Комната.
+ * @param counts         Текущий состав ролей комнаты.
+ * @param budget         Бюджет энергии комнаты (в тиках).
+ * @param deliveryRepair `true`, если комнате нужно чинить доставку энергии
+ *                       (см. {@link needsDeliveryRepair} в `utilities.ts`).
  */
 export function planSpawnOrder(
     room: Room,
     counts: Record<string, number>,
-    budget = Infinity
+    budget = Infinity,
+    deliveryRepair = false
 ): [RoleKey, number][] {
     const rcl = room.controller?.level ?? 0;
     const targets = getRoomTargets(rcl);
@@ -112,25 +121,66 @@ export function planSpawnOrder(
     // (источник на стене) RCL-цели недостижимы, и бот заводил бы больше
     // рабочих крипов, чем комната может прокормить — энергии хватало бы
     // только на замену умирающих, а работа стояла бы.
-    const upgraderTarget = Math.min(
+
+    // Стадия «починки доставки».
+    //
+    // Если в комнате нет хранилища рядом с клеткой добычи, харвестер
+    // переносит энергию через всю комнату, и доход падает в разы. Пока
+    // доход низкий, бюджет не покрывает даже замену умирающих крипов, и
+    // комната медленно съедает свой запас. Апгрейд контроллера в такой
+    // комнате бесполезен: апгрейдер забирает из структуры больше, чем
+    // комната добывает.
+    //
+    // Поэтому в этой стадии место в бюджете отдаётся билдеру: только он
+    // может достроить расширение рядом с клеткой добычи и поднять доход.
+    // Стройка идёт тысячи тиков, и всё это время контроллер не получает
+    // прогресса, поэтому стадия включается только пока до даунгрейда далеко.
+    //
+    // Билдер в этой стадии ровно один: достроить нужное расширение должен
+    // один крип, а второй только поделил бы ту же энергию.
+    const deliveryStage =
+        deliveryRepair &&
+        canUpgrade &&
+        (room.controller?.ticksToDowngrade ?? 0) >
+            DOWNGRADE_BUFFER_TICKS * DELIVERY_STAGE_DOWNGRADE_MARGIN;
+
+    const normalUpgraderTarget = Math.min(
         upgraderTargetByRcl,
         Math.max(1, Math.floor(budget / UPGRADER_ENERGY_RATE))
     );
-
-    const builderTarget = Math.min(
+    const normalBuilderTarget = Math.min(
         targets.builder,
-        Math.max(0, Math.floor(budget - upgraderTarget * UPGRADER_ENERGY_RATE))
+        Math.max(0, Math.floor(budget - normalUpgraderTarget * UPGRADER_ENERGY_RATE))
     );
 
-    const repairerTarget = Math.min(
-        targets.repairer,
-        Math.max(
-            0,
-            Math.floor(
-                budget - upgraderTarget * UPGRADER_ENERGY_RATE - builderTarget
+    let upgraderTarget = normalUpgraderTarget;
+    let builderTarget = normalBuilderTarget;
+
+    if (deliveryStage) {
+        builderTarget = Math.min(targets.builder, 1);
+        upgraderTarget = Math.min(
+            upgraderTargetByRcl,
+            Math.max(
+                0,
+                Math.floor(
+                    (budget - builderTarget * BUILDER_ENERGY_RATE) /
+                        UPGRADER_ENERGY_RATE
+                )
             )
-        )
-    );
+        );
+    }
+
+    const repairerTarget = deliveryStage
+        ? 0
+        : Math.min(
+              targets.repairer,
+              Math.max(
+                  0,
+                  Math.floor(
+                      budget - upgraderTarget * UPGRADER_ENERGY_RATE - builderTarget
+                  )
+              )
+          );
 
     const harvesterCount = counts[ROLE.HARVESTER] || 0;
 
@@ -146,8 +196,19 @@ export function planSpawnOrder(
     if (needsHarvesterFirst) {
         return [
             [ROLE.HARVESTER, targets.harvester],
-            [ROLE.UPGRADER, upgraderTarget],
             [ROLE.BUILDER, builderTarget],
+            [ROLE.UPGRADER, upgraderTarget],
+            [ROLE.REPAIRER, repairerTarget]
+        ];
+    }
+
+    // В стадии починки доставки билдер идёт первым: он должен появиться
+    // раньше, чем комната снова заберёт его место в бюджете.
+    if (deliveryStage) {
+        return [
+            [ROLE.BUILDER, builderTarget],
+            [ROLE.UPGRADER, upgraderTarget],
+            [ROLE.HARVESTER, targets.harvester],
             [ROLE.REPAIRER, repairerTarget]
         ];
     }
