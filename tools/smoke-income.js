@@ -316,6 +316,11 @@ function makeRoom(opts) {
         find(type, o) {
             const filter = o && o.filter;
             let list = [];
+            // An array of objects is a valid "type" for findClosestByPath.
+            if (Array.isArray(type)) {
+                const f = typeof filter === 'function' ? filter : null;
+                return f ? type.filter(f) : type;
+            }
             if (type === C.FIND_MY_SPAWNS) list = [spawn];
             else if (type === C.FIND_STRUCTURES || type === C.FIND_MY_STRUCTURES) list = structures;
             else if (type === C.FIND_CONSTRUCTION_SITES || type === C.FIND_MY_CONSTRUCTION_SITES) list = sites;
@@ -700,6 +705,26 @@ function actions(creep, kind) {
     check('a room with a long delivery keeps a builder',
         spawned.includes('builder'),
         JSON.stringify(spawned) + ` distance=${sim.room.memory._deliveryDistance}`);
+}
+
+// --- Scenario 9c: the harvester delivers the whole load at once ------------
+// An extension holds 50 energy, the harvester's backpack holds 100. Dumping
+// the load in two halves doubles the number of trips, and a trip is exactly
+// what limits the income. A target that takes the whole load is preferred.
+{
+    const sim = makeRoom({
+        extensions: [[18, 26, 0], [21, 26, 0]],
+        creeps: [[20, 22, 'harvester', 100]]
+    });
+
+    runTicks(sim, 1);
+
+    const harvester = sim.creeps[0];
+    const transfers = actions(harvester, 'transfer');
+
+    check('the harvester looks for a target that takes the whole load',
+        transfers.length > 0 && transfers[0][1] === 19 && transfers[0][2] === 26,
+        JSON.stringify(harvester.actions));
 }
 
 // --- Scenario 10: the extensions are planned next to the harvest tiles -----
