@@ -165,6 +165,11 @@ function makeRoom(opts) {
         find(type, o) {
             const filter = o && o.filter;
             let list = [];
+            // An array of objects is a valid "type" for findClosestByPath.
+            if (Array.isArray(type)) {
+                const f = typeof filter === 'function' ? filter : null;
+                return f ? type.filter(f) : type;
+            }
             if (type === C.FIND_MY_SPAWNS) list = [spawn];
             else if (type === C.FIND_STRUCTURES || type === C.FIND_MY_STRUCTURES) list = structures;
             else if (type === C.FIND_CONSTRUCTION_SITES || type === C.FIND_MY_CONSTRUCTION_SITES) list = sites;
