@@ -92,11 +92,14 @@ global.RoomPosition = class RoomPosition {
     }
 };
 
+const { installPathFinder } = require('./mock-pathfinder');
+
 const notifications = [];
 const createdSites = [];
 const destroyed = [];
 const movedCreeps = [];
 let tick = 1000;
+let currentRoom = null;
 
 // ---- fake room -----------------------------------------------------------
 const WALLS = new Set(['18,25']);
@@ -108,7 +111,13 @@ function makeRoom(opts) {
     opts = opts || {};
     const extensions = (opts.extensions || []).map(([x, y]) => ({
         structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, hits: 1000, hitsMax: 1000,
-        store: { energy: 50 }, room: null,
+        store: {
+            energy: 50,
+            getCapacity() { return 50; },
+            getFreeCapacity() { return 0; },
+            getUsedCapacity() { return 50; }
+        },
+        room: null,
         destroy() {
             destroyed.push([x, y]);
             // The engine removes the structure in the same tick.
@@ -138,7 +147,13 @@ function makeRoom(opts) {
     };
     const spawn = {
         name: 'Spawn1', structureType: C.STRUCTURE_SPAWN, pos: pos(19, 26), my: true,
-        store: { energy: 300 }, spawning: null, room: null, usedEnergy: 0,
+        store: {
+            energy: 300,
+            getCapacity() { return 300; },
+            getFreeCapacity() { return 0; },
+            getUsedCapacity() { return 300; }
+        },
+        spawning: null, room: null, usedEnergy: 0,
         spawnCreep() { return -4; } // ERR_BUSY — nothing spawns in the simulation
     };
 
@@ -182,6 +197,8 @@ function makeRoom(opts) {
     for (const s of structures) s.room = room;
     for (const c of creeps) c.room = room;
     source.room = room;
+    currentRoom = room;
+    installPathFinder(() => currentRoom);
     return { room, spawn, controller, extensions, sites, source, creeps };
 }
 
