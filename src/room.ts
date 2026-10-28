@@ -18,14 +18,18 @@ import {
     HARVEST_RATE_PER_WORK,
     HARVEST_EFFICIENCY,
     CREEP_LIFE_TICKS,
-    INCOME_SAMPLE_INTERVAL
+    INCOME_SAMPLE_INTERVAL,
+    DELIVERY_DISTANCE_THRESHOLD,
+    DELIVERY_CHECK_INTERVAL
 } from './constants';
 import { trySpawn } from './spawn';
 import {
     inspectSpawnRing,
     findFreeTileNear,
-    blocksBirthRing,
     collectHarvestSlots,
+    collectDeliveryTileKeys,
+    hasDeliverySite,
+    measureDeliveryDistance,
     bodyCost,
     type SpawnRingInfo
 } from './utilities';
@@ -100,7 +104,12 @@ export function run(room: Room): void {
         runTowers(room, defense);
     }
 
-    const spawnOrder = planSpawnOrder(room, counts, computeWorkBudget(room, counts));
+    const spawnOrder = planSpawnOrder(
+        room,
+        counts,
+        computeWorkBudget(room, counts),
+        needsDeliveryRepair(room)
+    );
 
     markExcessWorkers(room, homeCreeps, spawnOrder);
 
@@ -296,15 +305,19 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
         filter: (s) => s.structureType === STRUCTURE_EXTENSION
     });
 
-    // Сайты расширений в кольце радиуса 1 вокруг спавна бот не строит (см.
-    // `roles/builder.ts`): они занимают клетку рождения. Считать их
-    // «запланированными» расширениями нельзя — иначе бот не закажет
-    // замену, и кольцо так и останется занятым.
-    const buildableExtensionSites = extensionSites.filter(
-        (s) => !blocksBirthRing(room, s.pos.x, s.pos.y)
-    ).length;
-
-    const need = layout.maxExtensions - existingExtensions - buildableExtensionSites;
+    // Движок считает в лимит РCL и построенные расширения, и их
+    // construction sites: `checkControllerAvailability` в `screeps/engine`
+    // (`src/utils.js`) считает `type == structureType || type ==
+    // 'constructionSite' && structureType == type`. Значит, сайт расширения
+    // тоже занимает место в лимите — считать нужно все сайты, а не только
+    // те, что бот собирается достроить.
+    //
+    // При этом сам билдер site в кольце рождения достраивает (см.
+    // `roles/builder.ts`): и сайт, и готовое расширение одинаково занимают
+    // клетку рождения, поэтому достройка не уменьшает число свободных
+    // клеток. Значит, исключать такие сайты из подсчёта нельзя — иначе бот
+    // считает, что план ещё не выполнен, и не заказывает замену.
+    const need = layout.maxExtensions - existingExtensions - extensionSites.length;
 
     if (need <= 0) {
         return;
@@ -326,6 +339,30 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
         for (const slot of collectHarvestSlots(room, source)) {
             harvestSlots.add(`${slot.x},${slot.y}`);
         }
+    }
+
+    // Клетки доставки: рядом с клеткой добычи. Расширение на такой клетке
+    // превращает доставку энергии в один шаг вместо десяти.
+    //
+    // Это главный критерий расстановки, а не плотность кластера вокруг
+    // спавна: харвестер стоит на клетке добычи, и расстояние от неё до
+    // хранилища — это ровно та часть его цикла, которая не даёт добывать.
+    // В E34S53 источник лежит в стенном кармане, и путь от клетки добычи до
+    // хранилища, где ещё есть свободное место, занимает 8–10 клеток в обход
+    // стены. Расширение, поставленное вплотную к клетке добычи, сокращает
+    // дорогу до одного шага и заметно поднимает доход комнаты.
+    const deliveryTiles = collectDeliveryTileKeys(room);
+
+    // Занятые клетки: на них уже есть структура или стройплощадка, и
+    // повторный `createConstructionSite` там бесползен.
+    const occupied = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const c of room.find(FIND_CONSTRUCTION_SITES)) {
+        occupied.add(`${c.pos.x},${c.pos.y}`);
     }
 
     const terrain = room.getTerrain();
@@ -388,11 +425,23 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
                     continue;
                 }
 
+                // На занятой клетке расширение уже есть (или там стоит
+                // другая структура) — второй раз его не заказать.
+                if (occupied.has(`${x},${y}`)) {
+                    continue;
+                }
+
                 ring.push({ x, y });
             }
         }
 
         ring.sort((a, b) => {
+            // Клетки доставки — наивысший приоритет.
+            const deliveryDiff =
+                (deliveryTiles.has(`${b.x},${b.y}`) ? 1 : 0) -
+                (deliveryTiles.has(`${a.x},${a.y}`) ? 1 : 0);
+            if (deliveryDiff !== 0) return deliveryDiff;
+
             const diff = adjacencyScore(b.x, b.y) - adjacencyScore(a.x, a.y);
             if (diff !== 0) return diff;
             const da = Math.abs(a.x - spawn.pos.x) + Math.abs(a.y - spawn.pos.y);
@@ -417,6 +466,49 @@ function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
             adjacentSet.add(`${pos.x},${pos.y}`);
         }
     }
+}
+
+/**
+ * Кэширует измеренное расстояние доставки комнаты.
+ *
+ * @remarks
+ * Замер считает путь до ближайшего хранилища, а путь считать дорого, поэтому
+ * расстояние перемеряется раз в {@link DELIVERY_CHECK_INTERVAL} тиков. Для
+ * стратегического решения «чинить ли доставку» такая точность достаточна.
+ *
+ * @param room Комната.
+ * @returns Расстояние доставки в клетках пути.
+ */
+function updateDeliveryDistance(room: Room): number {
+    if (
+        room.memory._deliveryCheckTick &&
+        Game.time - room.memory._deliveryCheckTick < DELIVERY_CHECK_INTERVAL
+    ) {
+        return room.memory._deliveryDistance ?? 0;
+    }
+
+    room.memory._deliveryCheckTick = Game.time;
+    room.memory._deliveryDistance = measureDeliveryDistance(room);
+
+    return room.memory._deliveryDistance;
+}
+
+/**
+ * Определяет, нужно ли комнате чинить доставку энергии.
+ *
+ * @remarks
+ * Чинить есть что, когда хранилище далеко от клетки добычи (измеренное
+ * расстояние доставки) и при этом рядом с клеткой добычи есть площадка
+ * расширения, которую ещё можно достроить.
+ *
+ * @param room Комната.
+ * @returns `true`, если доставку надо чинить.
+ */
+function needsDeliveryRepair(room: Room): boolean {
+    return (
+        updateDeliveryDistance(room) >= DELIVERY_DISTANCE_THRESHOLD &&
+        hasDeliverySite(room)
+    );
 }
 
 /**

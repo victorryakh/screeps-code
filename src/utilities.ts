@@ -24,6 +24,12 @@ type MoveDest = RoomPosition | { pos: RoomPosition };
  * Путь хранится в `creep.memory._move` в формате `{ path, dest: { x, y, roomName }, time }`
  * и считается валидным, пока `Game.time - time < opts.reusePath ?? HOME_PATH_TTL`.
  *
+ * @remarks
+ * Движок записывает цель в `creep.memory._move.dest` как `{ x, y, room }` —
+ * поле называется `room`, а не `roomName`. Поэтому кэш проверяется по обоим
+ * именам: иначе ветка кэша никогда не срабатывала, и бот всегда звал
+ * `Creep.moveTo` заново, хотя путь уже был посчитан.
+ *
  * @param creep  Крип, который должен переместиться.
  * @param dest   Цель перемещения: `RoomPosition` или любой объект с полем `pos`
  *               (например, `Source`, `Structure`, `Creep`, `ConstructionSite`).
@@ -57,7 +63,7 @@ export function moveCached(
         moveMemory.dest &&
         moveMemory.dest.x === pos.x &&
         moveMemory.dest.y === pos.y &&
-        moveMemory.dest.roomName === pos.roomName &&
+        (moveMemory.dest.roomName ?? moveMemory.dest.room) === pos.roomName &&
         Game.time - (moveMemory.time || 0) < (opts.reusePath ?? HOME_PATH_TTL)
     ) {
         const result = creep.moveByPath(moveMemory.path);
@@ -253,16 +259,46 @@ export function transferEnergy(
  *              `[STRUCTURE_SPAWN, STRUCTURE_EXTENSION]`.
  * @returns Подходящая `Structure` или `null`, если в комнате нет
  *          структур со свободным местом.
+ *
+ * @remarks
+ * Крипов в поиске пути игнорируем — по той же причине, что и при перемещении
+ * (см. {@link withCreepsIgnored}): в тесной комнате один стоящий крип
+ * перекрывает единственный проход, и цель перестаёт находиться вообще. Если
+ * цель не найдена, харвестер вообще не может сдать энергию и уходит
+ * апгрейдить контроллер вместо доставки.
+ *
+ * Среди подходящих структур выбирается та, что **вмещает весь груз**:
+ * расширение вмещает 50 энергии, а рюкзак харвестера — 100. Слив груз
+ * порциями удваивает число рейсов, а рейс — это и есть та самая дорога,
+ * которая ограничивает доход. Если места хватает только на часть груза,
+ * берём ближайшую структуру с любым свободным местом.
  */
 export function findEnergyTransferTarget(
     creep: Creep,
     types: StructureConstant[] = [STRUCTURE_SPAWN, STRUCTURE_EXTENSION]
 ): Structure | null {
-    return creep.pos.findClosestByPath(FIND_STRUCTURES, {
+    const room = creep.room;
+
+    const candidates = room.find(FIND_STRUCTURES, {
         filter: (s): s is AnyStoreStructure =>
             (types as StructureConstant[]).indexOf(s.structureType) !== -1 &&
             'store' in s &&
             (s as AnyStoreStructure).store.getFreeCapacity(RESOURCE_ENERGY) > 0
+    });
+
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    const load = creep.store[RESOURCE_ENERGY];
+    const fits = candidates.filter(
+        (s) => s.store.getFreeCapacity(RESOURCE_ENERGY) >= load
+    );
+
+    const pool = fits.length > 0 ? fits : candidates;
+
+    return creep.pos.findClosestByPath(pool, {
+        ignore: [FIND_CREEPS]
     });
 }
 
@@ -305,6 +341,61 @@ export function findConstructionSite(
     return creep.pos.findClosestByPath(FIND_MY_CONSTRUCTION_SITES, {
         filter: filter
     });
+}
+
+/**
+ * Ищет construction site, который выгоднее построить в первую очередь:
+ * расширение рядом с клеткой добычи.
+ *
+ * @remarks
+ * Такое расширение сокращает доставку энергии с десяти клеток до одной и
+ * потому поднимает доход комнаты сильнее любого другого расширения. Поэтому
+ * билдер строит их раньше остальных площадок — тем более что в комнате с
+ * источником в стенном кармане запас расширений по лимиту RCL расходуется
+ * именно на неудобные места, и добраться до удобных потом уже нельзя.
+ *
+ * Из нескольких подходящих площадок выбирается та, что ближе к завершению
+ * (в ней уже вложено больше энергии) и после этого — ближе к крипу.
+ *
+ * @param creep  Крип-билдер.
+ * @param filter Фильтр площадок (как в {@link findConstructionSite}).
+ * @returns Площадка или `null`, если подходящих нет.
+ */
+export function findDeliverySite(
+    creep: Creep,
+    filter: (s: ConstructionSite) => boolean = (s) => s.progress < s.progressTotal
+): ConstructionSite | null {
+    const room = creep.room;
+    const delivery = collectDeliveryTileKeys(room);
+
+    if (delivery.size === 0) {
+        return null;
+    }
+
+    const useful = room
+        .find(FIND_MY_CONSTRUCTION_SITES, { filter: filter })
+        .filter((s) => delivery.has(`${s.pos.x},${s.pos.y}`));
+
+    if (useful.length === 0) {
+        return null;
+    }
+
+    const byDistance = (a: ConstructionSite, b: ConstructionSite): number => {
+        if (a.progress !== b.progress) {
+            return b.progress - a.progress;
+        }
+
+        const da = Math.max(Math.abs(a.pos.x - creep.pos.x), Math.abs(a.pos.y - creep.pos.y));
+        const db = Math.max(Math.abs(b.pos.x - creep.pos.x), Math.abs(b.pos.y - creep.pos.y));
+
+        if (da !== db) {
+            return da - db;
+        }
+
+        return a.pos.x + a.pos.y - (b.pos.x + b.pos.y);
+    };
+
+    return [...useful].sort(byDistance)[0] ?? null;
 }
 
 /**
@@ -946,6 +1037,211 @@ export function collectHarvestSlotKeys(room: Room): Set<string> {
 }
 
 /**
+ * Возвращает множество клеток, с которых харвестер может сдать энергию
+ * без ходьбы: клетки, соседние с клетками добычи.
+ *
+ * @remarks
+ * Это главный показатель «дальности доставки» комнаты. Харвестер стоит на
+ * клетке добычи и сдаёт энергию в структуру на расстоянии 1 (радиус
+ * `transfer`). Если ни одной такой структуры нет, энергию некуда сдать, и
+ * харвестер вынужден идти к хранилищу через всю комнату.
+ *
+ * В E34S53 источник лежит в стенном кармане, а все хранилища — по ту
+ * сторону стены: путь от клетки добычи до ближайшего расширения занимает
+ * 8–10 клеток, и харвестер тратит на дорогу столько же времени, сколько на
+ * добычу. Расширение, поставленное рядом с клеткой добычи, превращает
+ * десять клеток пути в одну.
+ *
+ * Множество содержит и сами клетки добычи? Нет: клетка добычи должна
+ * оставаться свободной для харвестера, и на ней нельзя ставить расширение
+ * (см. {@link collectHarvestSlots}).
+ *
+ * @param room Комната.
+ * @returns Множество клеток доставки в виде ключей `"x,y"`.
+ */
+export function collectDeliveryTileKeys(room: Room): Set<string> {
+    const slots = collectHarvestSlotKeys(room);
+    const keys = new Set<string>();
+
+    for (const slotKey of slots) {
+        const [sx, sy] = slotKey.split(',').map(Number);
+
+        if (sx === undefined || sy === undefined) {
+            continue;
+        }
+
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                if (dx === 0 && dy === 0) {
+                    continue;
+                }
+
+                const x = sx + dx;
+                const y = sy + dy;
+
+                if (x < 1 || x > 48 || y < 1 || y > 48) {
+                    continue;
+                }
+
+                if (slots.has(`${x},${y}`)) {
+                    continue;
+                }
+
+                keys.add(`${x},${y}`);
+            }
+        }
+    }
+
+    return keys;
+}
+
+/**
+ * Проверяет, находится ли клетка рядом с клеткой добычи — то есть может ли
+ * харвестер сдать в неё энергию, не сходя с клетки добычи.
+ *
+ * @param room Комната.
+ * @param x    X клетки.
+ * @param y    Y клетки.
+ * @returns `true`, если клетка соседствует с клеткой добычи.
+ */
+export function isDeliveryTile(room: Room, x: number, y: number): boolean {
+    return collectDeliveryTileKeys(room).has(`${x},${y}`);
+}
+
+/**
+ * Определяет, нужно ли комнате «чинить доставку».
+ *
+ * @remarks
+ * Возвращает `true`, когда в комнате есть площадка расширения рядом с
+ * клеткой добычи, но рядом с клеткой добычи ещё нет ни одного хранилища.
+ *
+ * Такая комната ограничена дальностью доставки: харвестер несёт энергию
+ * через всю комнату, и на дорогу уходит столько же времени, сколько на
+ * добычу. Пока это так, доход комнаты не растёт, а значит, не растёт и
+ * бюджет: не хватает энергии ни на апгрейд, ни на замену умирающих крипов.
+ * Единственный способ разоржать этот круг — достроить расширение рядом с
+ * клеткой добычи, а для этого нужен билдер.
+ *
+ * @param room Комната.
+ * @returns `true`, если доставку в комнате надо чинить.
+ */
+export function hasDeliverySite(room: Room): boolean {
+    const delivery = collectDeliveryTileKeys(room);
+
+    if (delivery.size === 0) {
+        return false;
+    }
+
+    for (const site of room.find(FIND_MY_CONSTRUCTION_SITES, {
+        filter: (s) =>
+            s.structureType === STRUCTURE_EXTENSION && s.progress < s.progressTotal
+    })) {
+        if (delivery.has(`${site.pos.x},${site.pos.y}`)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Измеряет расстояние доставки комнаты: сколько клеток пути в среднем
+ * проходит харвестер от клетки добычи до ближайшего хранилища.
+ *
+ * @remarks
+ * Это и есть та величина, которая ограничивает доход: харвестер уходит
+ * с клетки добычи, несёт энергию и возвращается. Дорога занимает столько
+ * же тиков, сколько добыча, и тем хуже, чем длиннее путь.
+ *
+ * Расстояние меряется по ПУТИ, а не по прямой: в E34S53 источник лежит в
+ * стенном кармане, и по прямой до хранилища три клетки, а по пути — десять,
+ * потому что стена отрезает карман от остальной комнаты.
+ *
+ * Усреднение по всем клеткам добычи, а не минимум: клетки добычи в комнате
+ * бывают очень разными по расстоянию до хранилища, и харвестеры занимают
+ * их все. В E34S53 от клетки (20,24) до спавна два шага, а от (20,22) —
+ * десять; среднее — около семи.
+ *
+ * @param room Комната.
+ * @returns Средняя длина пути в клетках; `0`, если доставлять некуда.
+ */
+export function measureDeliveryDistance(room: Room): number {
+    try {
+        return measureDeliveryDistanceUnsafe(room);
+    } catch {
+        // Замер не удался — считаем, что доставка короткая, и не ломаем из-за
+        // этого решение по составу крипов.
+        return 0;
+    }
+}
+
+/**
+ * Измеряет расстояние доставки комнаты без защиты от ошибок: сама логика
+ * замера (см. {@link measureDeliveryDistance}).
+ *
+ * @param room Комната.
+ * @returns Средняя длина пути в клетках.
+ */
+function measureDeliveryDistanceUnsafe(room: Room): number {
+    const slots = collectHarvestSlotKeys(room);
+
+    if (slots.size === 0) {
+        return 0;
+    }
+
+    const storages = room.find(FIND_MY_STRUCTURES, {
+        filter: (s) =>
+            s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION
+    });
+
+    if (storages.length === 0) {
+        return 0;
+    }
+
+    // Считаем расстояние до того хранилища, куда харвестер реально может
+    // сдать энергию, — до ближайшего с местом. Если свободного места нет
+    // нигде, берём ближайшее хранилище вообще.
+    //
+    // Разница существенная: в E34S53 спавн и расширения у источника забиты
+    // под завязку, и единственное свободное место — у расширений на другом
+    // конце коридора. Харвестер идёт туда за восемь-девять клеток, чтобы
+    // сдать пятьдесят энергии, и вот это и ограничивает доход комнаты.
+    const withRoom = storages.filter(
+        (s) => s.store.getFreeCapacity(RESOURCE_ENERGY) > 0
+    );
+    const pool = withRoom.length > 0 ? withRoom : storages;
+
+    const goals = pool.map((s) => ({ pos: s.pos, range: 1 }));
+    let total = 0;
+    let counted = 0;
+
+    for (const slotKey of slots) {
+        const [x, y] = slotKey.split(',').map(Number);
+
+        if (x === undefined || y === undefined) {
+            continue;
+        }
+
+        try {
+            const path = PathFinder.search(new RoomPosition(x, y, room.name), goals);
+
+            if (path) {
+                total += path.path.length;
+                counted++;
+            }
+        } catch {
+            return 0;
+        }
+    }
+
+    if (counted === 0) {
+        return 0;
+    }
+
+    return Math.round((total / counted) * 10) / 10;
+}
+
+/**
  * Ищет клетку, с которой можно строить construction site.
  *
  * @remarks
@@ -1051,6 +1347,12 @@ export function findBuildSpot(creep: Creep, site: ConstructionSite): RoomPositio
  * Клетки добычи исключены — они принадлежат харвестерам. Кольцо рождения
  * вокруг спавна тоже исключено: вставший на него крип закрывает спавн.
  *
+ * Из оставшихся клеток предпочтение отдаётся тем, что соседствуют с
+ * донором (спавном или расширением с энергией): апгрейдер работает циклами
+ * «набрал — потратил», и дорога к донору — потерянное время. В E34S53 клетка
+ * (16,25) соседствует и с расширением (17,26), и с зоной апгрейда
+ * контроллера (17,24) — апгрейдеру с неё не нужно никуда идти.
+ *
  * @param room  Комната.
  * @param creep Крип, для которого ищется место (его собственная клетка не
  *              считается занятой).
@@ -1123,7 +1425,40 @@ export function findUpgradeSpot(room: Room, creep: Creep): RoomPosition | null {
         }
     }
 
+    // Клетки, с которых можно без ходьбы взять энергию: апгрейдер работает
+    // циклами «набрал — потратил», и каждая дорога к донору — это потерянное
+    // время. Кандидат рядом с донором лучше кандидата, который ближе к
+    // текущей позиции крипа, но на 3 клетки дальше от хранилища.
+    const donorAdjacent = new Set<string>();
+
+    for (const s of room.find(FIND_MY_STRUCTURES)) {
+        if (
+            (s.structureType !== STRUCTURE_SPAWN && s.structureType !== STRUCTURE_EXTENSION) ||
+            !('store' in s) ||
+            (s as AnyStoreStructure).store.energy <= 0
+        ) {
+            continue;
+        }
+
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                if (dx === 0 && dy === 0) {
+                    continue;
+                }
+
+                donorAdjacent.add(`${s.pos.x + dx},${s.pos.y + dy}`);
+            }
+        }
+    }
+
     candidates.sort((a, b) => {
+        const na = donorAdjacent.has(`${a.x},${a.y}`) ? 1 : 0;
+        const nb = donorAdjacent.has(`${b.x},${b.y}`) ? 1 : 0;
+
+        if (na !== nb) {
+            return nb - na;
+        }
+
         const da = Math.max(Math.abs(a.x - creep.pos.x), Math.abs(a.y - creep.pos.y));
         const db = Math.max(Math.abs(b.x - creep.pos.x), Math.abs(b.y - creep.pos.y));
 

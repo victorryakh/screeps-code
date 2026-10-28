@@ -82,7 +82,7 @@ declare global {
          */
         _move?: {
             path: RoomPosition[];
-            dest: { x: number; y: number; roomName: string };
+            dest: { x: number; y: number; roomName?: string; room?: string };
             time: number;
         };
     }
@@ -156,6 +156,17 @@ declare global {
          * (см. `roles/upgrader.ts`).
          */
         _sourceSaturated?: boolean;
+        /** Тик последнего замера расстояния доставки комнаты (см. `updateDeliveryDistance`). */
+        _deliveryCheckTick?: number;
+        /**
+         * Измеренное расстояние доставки комнаты в клетках пути.
+         *
+         * @remarks
+         * Сколько клеток пути от клетки добычи до ближайшего хранилища.
+         * В E34S53 — десять: источник лежит в стенном кармане, и стена
+         * отрезает его от остальной комнаты.
+         */
+        _deliveryDistance?: number;
         /** Тик, на котором был создан последний крип; используется как однотиковый кулдаун спавна. */
         _spawnCooldown?: number;
         /** Счётчик чередования источников между харвестерами для равномерной нагрузки. */

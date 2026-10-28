@@ -15,6 +15,7 @@ import {
     harvestEnergy,
     findClosestSource,
     findConstructionSite,
+    findDeliverySite,
     findEnergyDonor,
     findBuildSpot,
     findFreeTileNear,
@@ -58,6 +59,21 @@ function isBuildable(site: ConstructionSite): boolean {
     }
 
     return true;
+}
+
+/**
+ * Выбирает площадку, которую билдер строит в первую очередь.
+ *
+ * @remarks
+ * Расширение рядом с клеткой добычи поднимает доход комнаты сильнее всего
+ * (доставка энергии сокращается с десяти клеток до одной), поэтому такие
+ * площадки билдер строит первыми. Остальные — по ближайшей.
+ *
+ * @param creep Крип-билдер.
+ * @returns Площадка или `null`, если строить нечего.
+ */
+function findSiteToBuild(creep: Creep): ConstructionSite | null {
+    return findDeliverySite(creep, isBuildable) ?? findConstructionSite(creep, isBuildable);
 }
 
 /**
@@ -157,7 +173,7 @@ export function run(creep: Creep): void {
     }
 
     if (creep.memory.building) {
-        const site = findConstructionSite(creep, isBuildable);
+        const site = findSiteToBuild(creep);
 
         if (site) {
             const spot = ensureBuildSpot(creep, site);
@@ -195,7 +211,7 @@ export function run(creep: Creep): void {
                 // или клетке рождения он не должен — они отнимают доход у
                 // харвестеров и закрывают спавн. Ждём у стройки: там клетка
                 // заведомо свободна.
-                const site = findConstructionSite(creep, isBuildable);
+                const site = findSiteToBuild(creep);
 
                 if (site) {
                     const spot = ensureBuildSpot(creep, site);
@@ -228,7 +244,7 @@ export function run(creep: Creep): void {
 
         creep.memory.building = true;
 
-        const site = findConstructionSite(creep, isBuildable);
+        const site = findSiteToBuild(creep);
 
         if (site) {
             const spot = ensureBuildSpot(creep, site);
