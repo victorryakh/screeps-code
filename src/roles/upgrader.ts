@@ -28,7 +28,6 @@ import {
     isSourceSaturated,
     moveCached,
     blocksBirthRing,
-    findFreeTileNear,
     collectHarvestSlotKeys
 } from '../utilities';
 import { UPGRADE_RANGE, UPGRADE_SPOT_VERSION } from '../constants';
@@ -48,36 +47,6 @@ function isReservedTile(room: Room, x: number, y: number): boolean {
     }
 
     return collectHarvestSlotKeys(room).has(`${x},${y}`);
-}
-
-/**
- * Проверяет, есть ли рядом свободная клетка, на которую можно уйти с кольца
- * рождения.
- *
- * @param room  Комната.
- * @param creep Крип, который ищет, куда отойти.
- * @returns `true`, если отойти есть куда.
- */
-function canStepOffBirthRing(room: Room, creep: Creep): boolean {
-    const reserved = new Set<string>();
-
-    for (const spawn of room.find(FIND_MY_SPAWNS)) {
-        for (let dx = -1; dx <= 1; dx++) {
-            for (let dy = -1; dy <= 1; dy++) {
-                if (dx === 0 && dy === 0) {
-                    continue;
-                }
-
-                reserved.add(`${spawn.pos.x + dx},${spawn.pos.y + dy}`);
-            }
-        }
-    }
-
-    for (const key of collectHarvestSlotKeys(room)) {
-        reserved.add(key);
-    }
-
-    return findFreeTileNear(room, creep.pos, reserved, 2) !== null;
 }
 
 /**
@@ -126,17 +95,12 @@ function tryUpgradeInPlace(creep: Creep): boolean {
         return false;
     }
 
-    // Клетка рождения: уйти с неё лучше (спавну нужна клетка), но если уйти
-    // некуда — работаем здесь. Иначе контроллер замирает: в E34S53 апгрейдер
-    // был заперт в «кармане» у спавна, единственный выход из которого вёл
-    // через клетку, занятую другим крипом, — и он не мог ни уйти, ни
-    // апгрейдить.
-    if (
-        blocksBirthRing(creep.room, creep.pos.x, creep.pos.y) &&
-        canStepOffBirthRing(creep.room, creep)
-    ) {
-        return false;
-    }
+    // Клетка рождения — не запрет: спавн от неё страдает только тогда, когда
+    // свободных клеток в кольце не осталось, а этим занимается отдельная
+    // проверка в `room.ts` ({@link ensureSpawnRingReserve}). Запрещать здесь
+    // апгрейд опасно: в E34S53 апгрейдер оказывался заперт в «кармане» у
+    // спавна (единственный выход вёл через клетку, занятую другим крипом) и
+    // не мог ни уйти, ни апгрейдить — контроллер снова замирал.
 
     return creep.upgradeController(controller) === OK;
 }
