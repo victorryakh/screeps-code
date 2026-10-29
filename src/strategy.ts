@@ -177,7 +177,9 @@ export function planSpawnOrder(
               Math.max(
                   0,
                   Math.floor(
-                      budget - upgraderTarget * UPGRADER_ENERGY_RATE - builderTarget
+                      budget -
+                          upgraderTarget * UPGRADER_ENERGY_RATE -
+                          builderTarget * BUILDER_ENERGY_RATE
                   )
               )
           );
