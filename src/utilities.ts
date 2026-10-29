@@ -1334,6 +1334,58 @@ export function findBuildSpot(creep: Creep, site: ConstructionSite): RoomPositio
 }
 
 /**
+ * Ищет ближайшую к точке клетку из списка по длине пути.
+ *
+ * @remarks
+ * Расстояние по прямой не годится: в комнатах со стенами рельефа две
+ * клетки в метре друг от друга могут быть соединены пятнадцатикилометровым
+ * обходом. Здесь длина пути считается движком (`PathFinder.search` с
+ * несколькими целями) — движок возвращает путь к ближайшей достижимой цели.
+ *
+ * @param origin     Откуда считаем путь.
+ * @param candidates Клетки-кандидаты.
+ * @returns Ближайшая по пути клетка с длиной пути либо `null`, если путь не
+ *          найден.
+ */
+function findClosestCandidateByPath(
+    origin: RoomPosition,
+    candidates: RoomPosition[]
+): { pos: RoomPosition; length: number } | null {
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    try {
+        const goals = candidates.map((pos) => ({ pos: pos, range: 0 }));
+
+        // `ignore` движок понимает, но в типах его нет — отсюда приведение.
+        const path = PathFinder.search(origin, goals, {
+            ignore: [FIND_CREEPS]
+        } as unknown as PathFinderOpts);
+
+        if (!path || !path.path || path.path.length === 0) {
+            return null;
+        }
+
+        const end = path.path[path.path.length - 1];
+
+        if (!end) {
+            return null;
+        }
+
+        const pos = candidates.find((candidate) => candidate.x === end.x && candidate.y === end.y);
+
+        if (!pos) {
+            return null;
+        }
+
+        return { pos: pos, length: path.path.length };
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Ищет клетку, с которой можно апгрейдить контроллер, не занимая при этом
  * ни клетку добычи, ни клетку рождения.
  *
@@ -1380,13 +1432,14 @@ export function findUpgradeSpot(room: Room, creep: Creep): RoomPosition | null {
         blocked.add(`${c.pos.x},${c.pos.y}`);
     }
 
-    for (const c of room.find(FIND_CREEPS)) {
-        if (c.name === creep.name) {
-            continue;
-        }
-
-        blocked.add(`${c.pos.x},${c.pos.y}`);
-    }
+    // Крипов в список занятых клеток не добавляем: они подвижны, и клетка,
+    // которую крип занимает сейчас, через десять тиков будет свободна. Если
+    // учитывать их, выбор клетки апгрейда зависел бы от того, где в этот
+    // момент оказался харвестер: в E34S53 харвестер проходил через
+    // (20,21) — единственную клетку рядом с клетками добычи, — и апгрейдер
+    // из-за этого уходил в дальний конец комнаты, а харвестеры ходили за
+    // энергией через полкомнаты. Занятость клетки живым крипом проверит
+    // `ensureUpgradeSpot` отдельно.
 
     for (const source of room.find(FIND_SOURCES)) {
         for (const slot of collectHarvestSlots(room, source)) {
@@ -1425,6 +1478,56 @@ export function findUpgradeSpot(room: Room, creep: Creep): RoomPosition | null {
         }
     }
 
+    // Клетку выбираем по длине пути до клеток добычи: именно туда
+    // харвестеры приносят энергию, и оттуда она уходит к апгрейдеру. Чем
+    // ближе апгрейдер к добыче, тем короче рейс харвестера и тем выше
+    // доход комнаты.
+    //
+    // Расстояние «по прямой» здесь обманывает: в E34S53 клетка (16,25) в
+    // трёх шагах от крипа, но в пятнадцати по пути — между ними стена
+    // рельефа. Прежний выбор (клетка рядом с любым донором) тянул
+    // апгрейдера в дальний угол комнаты, к расширению (17,26): контроллер
+    // получал понемногу прогресса, а харвестеры ходили за энергией через
+    // всю комнату, и доход падал втрое.
+    const slots = collectHarvestSlotKeys(room);
+    let best: { pos: RoomPosition; length: number } | null = null;
+
+    for (const key of slots) {
+        const [x, y] = key.split(',').map(Number);
+
+        if (x === undefined || y === undefined) {
+            continue;
+        }
+
+        const found = findClosestCandidateByPath(
+            new RoomPosition(x, y, room.name),
+            candidates
+        );
+
+        if (found && (!best || found.length < best.length)) {
+            best = found;
+        }
+    }
+
+    if (best) {
+        return best.pos;
+    }
+
+    // Источника нет или клетки добычи недостижимы — берём клетку рядом с
+    // хранилищем, из которого апгрейдер берёт энергию.
+    const donor = findEnergyDonor(creep);
+
+    if (donor) {
+        const byPath = findClosestCandidateByPath(donor.pos, candidates);
+
+        if (byPath) {
+            return byPath.pos;
+        }
+    }
+
+    // Запасной вариант: если путь посчитать не удалось, берём клетку рядом с
+    // донором, а затем — ближайшую к крипу.
+    //
     // Клетки, с которых можно без ходьбы взять энергию: апгрейдер работает
     // циклами «набрал — потратил», и каждая дорога к донору — это потерянное
     // время. Кандидат рядом с донором лучше кандидата, который ближе к
