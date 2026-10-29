@@ -4,7 +4,8 @@ import {
     REPAIR_THRESHOLD,
     BIRTH_BLOCKING_TYPES,
     WALL_TERRAIN,
-    UPGRADE_RANGE
+    UPGRADE_RANGE,
+    HARVEST_RATE_PER_WORK
 } from './constants';
 import { EXPANSION } from './strategy';
 
@@ -180,6 +181,11 @@ export function harvestEnergy(
             const result = moveCached(creep, tile, moveOpts);
 
             if (result === OK || result === ERR_TIRED) {
+                // Запоминаем клетку: распределение клеток добычи должно быть
+                // устойчивым, иначе харвестеры каждый тик меняются местами
+                // и в итоге не копает никто (см. `findHarvestTiles`).
+                creep.memory._harvestTile = { x: tile.x, y: tile.y };
+
                 return result;
             }
         }
@@ -263,15 +269,23 @@ export function transferEnergy(
  * @remarks
  * Крипов в поиске пути игнорируем — по той же причине, что и при перемещении
  * (см. {@link withCreepsIgnored}): в тесной комнате один стоящий крип
- * перекрывает единственный проход, и цель перестаёт находиться вообще. Если
- * цель не найдена, харвестер вообще не может сдать энергию и уходит
- * апгрейдить контроллер вместо доставки.
+ * перекрывает единственный проход, и цель перестаёт находиться вообще.
  *
- * Среди подходящих структур выбирается та, что **вмещает весь груз**:
- * расширение вмещает 50 энергии, а рюкзак харвестера — 100. Слив груз
- * порциями удваивает число рейсов, а рейс — это и есть та самая дорога,
- * которая ограничивает доход. Если места хватает только на часть груза,
- * берём ближайшую структуру с любым свободным местом.
+ * Выбирается не «самое вместительное», а самое **быстрое**: хранилище, в
+ * которое крип успеет принести больше энергии в тик. Для хранилища с
+ * вместимостью `F` (не больше рюкзака) на расстоянии `D`:
+ *
+ * ```
+ * время цикла = F / скорость добычи + 2D   (дорога туда-обратно)
+ * скорость    = F / (F / скорость добычи + 2D)
+ * ```
+ *
+ * «Влезает весь рюкзак» — самоцель не в том, что большое хранилище
+ * экономит одну дорогу: в E34S53 спавн вмещает 100 энергии, но стоит в
+ * «кармане», из которого к источнику возвращаются только через клетку
+ * добычи, — и харвестер, сдавший туда энергию, оказывался заперт в
+ * кармане без работы. Соседнее с клеткой добычи расширение (вместимость 50)
+ * даёт не меньшую скорость и крипа не запирает.
  */
 export function findEnergyTransferTarget(
     creep: Creep,
@@ -284,22 +298,44 @@ export function findEnergyTransferTarget(
             (types as StructureConstant[]).indexOf(s.structureType) !== -1 &&
             'store' in s &&
             (s as AnyStoreStructure).store.getFreeCapacity(RESOURCE_ENERGY) > 0
-    });
+    }) as AnyStoreStructure[];
 
     if (candidates.length === 0) {
         return null;
     }
 
-    const load = creep.store[RESOURCE_ENERGY];
-    const fits = candidates.filter(
-        (s) => s.store.getFreeCapacity(RESOURCE_ENERGY) >= load
-    );
+    const load = Math.max(1, creep.store[RESOURCE_ENERGY]);
+    let work = 0;
 
-    const pool = fits.length > 0 ? fits : candidates;
+    for (const part of creep.body) {
+        if (part.type === WORK) {
+            work++;
+        }
+    }
 
-    return creep.pos.findClosestByPath(pool, {
-        ignore: [FIND_CREEPS]
-    });
+    const harvestRate = Math.max(1, work * HARVEST_RATE_PER_WORK);
+
+    let best: AnyStoreStructure | null = null;
+    let bestRate = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const candidate of candidates) {
+        const capacity = Math.min(candidate.store.getFreeCapacity(RESOURCE_ENERGY), load);
+        const distance = Math.max(
+            Math.abs(candidate.pos.x - creep.pos.x),
+            Math.abs(candidate.pos.y - creep.pos.y)
+        );
+
+        const rate = capacity / (capacity / harvestRate + 2 * distance);
+
+        if (rate > bestRate || (rate === bestRate && distance < bestDistance)) {
+            best = candidate;
+            bestRate = rate;
+            bestDistance = distance;
+        }
+    }
+
+    return best;
 }
 
 /**
@@ -894,10 +930,18 @@ export function collectHarvestSlots(
  * это и убивало колонию в E34S53: три апгрейдера держали все три клетки
  * добычи, харвестеры не получали цели вовсе и копили энергию по нулям.
  *
+ * Своя клетка (запомненная в `creep.memory._harvestTile`) всегда идёт
+ * первой. Распределение клеток должно быть устойчивым: если каждый тик
+ * брать «ближайшую клетку», харвестеры меняются местами (ближайшая клетка
+ * меняется по мере движения крипа), толкают друг друга с источника, и в
+ * итоге никто не копает. В E34S53 третий харвестер так и ходил между
+ * двумя клетками в кармане у источника, а доход комнаты был втрое ниже
+ * возможного.
+ *
  * @param creep  Крип, которому нужен подход.
  * @param target Цель добычи (`Source`, `Mineral`, `Deposit`).
- * @returns Подходящие клетки: сначала свободные, затем занятые; ближайшая к
- *          крипу — первой.
+ * @returns Подходящие клетки: сначала своя, затем свободные, затем занятые;
+ *          ближайшая к крипу — первой.
  */
 export function findHarvestTiles(
     creep: Creep,
@@ -909,14 +953,29 @@ export function findHarvestTiles(
     const occupied = new Set<string>();
 
     for (const c of room.find(FIND_CREEPS)) {
+        if (c.name === creep.name) {
+            continue;
+        }
+
         occupied.add(`${c.pos.x},${c.pos.y}`);
     }
 
+    const cached = creep.memory._harvestTile;
     const free: RoomPosition[] = [];
     const taken: RoomPosition[] = [];
+    const mine: RoomPosition[] = [];
 
     for (const slot of slots) {
-        if (occupied.has(`${slot.x},${slot.y}`)) {
+        const key = `${slot.x},${slot.y}`;
+        const isMine =
+            cached !== undefined && cached.x === slot.x && cached.y === slot.y;
+
+        if (isMine && !occupied.has(key)) {
+            mine.push(slot);
+            continue;
+        }
+
+        if (occupied.has(key)) {
             taken.push(slot);
         } else {
             free.push(slot);
@@ -937,7 +996,7 @@ export function findHarvestTiles(
     free.sort(byDistance);
     taken.sort(byDistance);
 
-    return free.concat(taken);
+    return mine.concat(free, taken);
 }
 
 /**
@@ -950,16 +1009,51 @@ export function findHarvestTiles(
  * заняты, энергию для апгрейда/стройки/ремонта приходится брать из
  * структуры, куда её сливают харвестеры.
  *
+ * Донором выбирается хранилище, ближайшее **к клеткам добычи**, а не
+ * ближайшее к крипу. Разница принципиальная: харвестер сдаёт энергию в
+ * ближайшее к нему хранилище, где есть место, — то есть в то, что стоит
+ * у источника. Если рабочий крип брал энергию из «ближайшего к нему»
+ * хранилища, возникал замкнутый круг: харвестеры сдавали энергию в дальний
+ * конец комнаты (ближние хранилища были полны), рабочий крип опустошал
+ * дальний конец (он был к нему ближе), и ближние хранилища не пустели
+ * никогда. Рейс харвестера так и оставался длинным, а доход комнаты — в
+ *трое ниже расчётного.
+ *
  * @param creep Крип, относительно которого ищется донор.
  * @returns Структура с энергией или `null`.
  */
 export function findEnergyDonor(creep: Creep): AnyStoreStructure | null {
-    const donor = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
+    const room = creep.room;
+
+    const candidates = room.find(FIND_MY_STRUCTURES, {
         filter: (s) =>
             (s.structureType === STRUCTURE_SPAWN ||
                 s.structureType === STRUCTURE_EXTENSION) &&
             'store' in s &&
-            s.store.energy > 0
+            (s as AnyStoreStructure).store.energy > 0
+    }) as AnyStoreStructure[];
+
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    const slots = collectHarvestSlotKeys(room);
+    let pool = candidates;
+    let best = Number.POSITIVE_INFINITY;
+
+    for (const candidate of candidates) {
+        const distance = distanceToHarvestSlots(candidate.pos, slots);
+
+        if (distance < best) {
+            best = distance;
+            pool = [candidate];
+        } else if (distance === best) {
+            pool.push(candidate);
+        }
+    }
+
+    const donor = creep.pos.findClosestByPath(pool, {
+        ignore: [FIND_CREEPS]
     });
 
     if (!donor) {
@@ -967,6 +1061,37 @@ export function findEnergyDonor(creep: Creep): AnyStoreStructure | null {
     }
 
     return donor as AnyStoreStructure;
+}
+
+/**
+ * Считает расстояние от точки до ближайшей клетки добычи.
+ *
+ * @param pos   Точка.
+ * @param slots Клетки добычи в формате `"x,y"`.
+ * @returns Расстояние в клетках (0, если клеток добычи нет).
+ */
+function distanceToHarvestSlots(pos: RoomPosition, slots: Set<string>): number {
+    if (slots.size === 0) {
+        return 0;
+    }
+
+    let best = Number.POSITIVE_INFINITY;
+
+    for (const key of slots) {
+        const [x, y] = key.split(',').map(Number);
+
+        if (x === undefined || y === undefined) {
+            continue;
+        }
+
+        const distance = Math.max(Math.abs(pos.x - x), Math.abs(pos.y - y));
+
+        if (distance < best) {
+            best = distance;
+        }
+    }
+
+    return best === Number.POSITIVE_INFINITY ? 0 : best;
 }
 
 /**
