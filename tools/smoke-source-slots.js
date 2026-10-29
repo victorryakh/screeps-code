@@ -419,9 +419,17 @@ function actions(creep, kind) {
         `harvest=${harvestCalls} withdraw=${withdrawCalls}`);
 }
 
-// --- Scenario 4: the upgrader does not park on the spawn's birth ring -------
-// The donor is the spawn, so the upgrader stands next to it while withdrawing.
-// A creep on a birth tile seals the spawn, so it must step aside afterwards.
+// --- Scenario 4: the upgrader works from where it stands --------------------
+// The upgrader has to end up somewhere it can upgrade the controller from,
+// and it must not steal a harvest slot from the harvesters.
+//
+// Whether a creep may stand on the spawn's birth ring is a *room* question:
+// the ring has to keep free cells for the engine to place a newborn, and
+// that is checked in smoke-spawn-access.js. A role-level ban produced a
+// deadlock: in E34S53 the upgrader was locked in the pocket next to the
+// spawn (the only exit ran through a cell occupied by another harvester) and
+// could neither leave nor upgrade — the controller stopped receiving
+// progress altogether.
 {
     const sim = makeRoom({
         creeps: [
@@ -433,18 +441,15 @@ function actions(creep, kind) {
     });
     runTicks(sim, 1);
     const upgrader = sim.creeps.find((c) => c.memory.role === 'upgrader');
-    const moves = actions(upgrader, 'moveTo').map((m) => `${m[1]},${m[2]}`);
-    const onRing = moves.filter((t) => Math.max(Math.abs(Number(t.split(',')[0]) - 19), Math.abs(Number(t.split(',')[1]) - 26)) === 1);
+    const upgrades = actions(upgrader, 'upgrade').length;
+    const harvestSlots = ['20,22', '20,23', '20,24'];
 
-    check('the upgrader leaves the birth ring of the spawn',
-        moves.length > 0 && onRing.length === 0,
-        `moves=${JSON.stringify(moves)}`);
-    check('the upgrader stays within the upgrade range of the controller',
-        moves.length > 0 && moves.every((t) => {
-            const [x, y] = t.split(',').map(Number);
-            return Math.max(Math.abs(x - 17), Math.abs(y - 24)) <= 3;
-        }),
-        JSON.stringify(moves));
+    check('the upgrader upgrades from where it stands when it is in range',
+        upgrades > 0,
+        `upgrades=${upgrades}`);
+    check('the upgrader does not stand on a harvest slot',
+        !harvestSlots.includes(`${upgrader.pos.x},${upgrader.pos.y}`),
+        `${upgrader.pos.x},${upgrader.pos.y}`);
 }
 
 
