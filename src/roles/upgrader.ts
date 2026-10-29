@@ -26,8 +26,84 @@ import {
     withdrawEnergy,
     upgradeRoomController,
     isSourceSaturated,
-    moveCached
+    moveCached,
+    blocksBirthRing,
+    collectHarvestSlotKeys
 } from '../utilities';
+import { UPGRADE_RANGE, UPGRADE_SPOT_VERSION } from '../constants';
+
+/**
+ * Проверяет, что клетка занята не под крипа: клетки добычи принадлежат
+ * харвестерам, клетки рождения — спавну.
+ *
+ * @param room Комната.
+ * @param x    X клетки.
+ * @param y    Y клетки.
+ * @returns `true`, если на клетке нельзя стоять рабочему крипу.
+ */
+function isReservedTile(room: Room, x: number, y: number): boolean {
+    if (blocksBirthRing(room, x, y)) {
+        return true;
+    }
+
+    return collectHarvestSlotKeys(room).has(`${x},${y}`);
+}
+
+/**
+ * Апгрейдит контроллер «здесь и сейчас», если крип уже в зоне апгрейда.
+ *
+ * @remarks
+ * Апгрейд работает с расстояния 3 (`upgradeController` проверяет
+ * `inRangeTo(pos, 3)`), поэтому идти ради апгрейда в другую часть комнаты
+ * незачем. Раньше апгрейдер шёл к заранее выбранной клетке и апгрейдил
+ * контроллер только после того, как до неё добрался. В E34S53 клетка
+ * оказывалась в пятнадцати шагах по пути, крип туда не доходил — и
+ * контроллер не получал ни единицы прогресса, хотя энергия у крипа была.
+ *
+ * На клетке добычи апгрейдить нельзя: она принадлежит харвестерам, и
+ * занять её — значит отнять у комнаты треть дохода.
+ *
+ * Клетка рождения — другое дело: там апгрейд разрешён. В E34S53 крип,
+ * запертый в «кармане» у спавна, был в зоне апгрейда, но правило «не стоять
+ * на кольце рождения» запрещало ему апгрейдить — и контроллер снова замер.
+ * Кольцом рождения занимается отдельная проверка в `room.ts`
+ * ({@link ensureSpawnRingReserve}), которая сдвигает крипов с кольца, когда
+ * это возможно; запрещать апгрейд из-за клетки нельзя — иначе запертый
+ * крип просто не работает.
+ *
+ * @param creep Крип-апгрейдер.
+ * @returns `true`, если контроллер был апгрейднут.
+ */
+function tryUpgradeInPlace(creep: Creep): boolean {
+    const controller = creep.room.controller;
+
+    if (!controller || !controller.my) {
+        return false;
+    }
+
+    // Расстояние считаем сами (шквал Хеви): движок проверяет ровно это же
+    // условие в `upgradeController`, а считать его явно позволяет работать
+    // и оффлайн-тестам, где у позиции нет метода `inRangeTo`.
+    const dx = Math.abs(creep.pos.x - controller.pos.x);
+    const dy = Math.abs(creep.pos.y - controller.pos.y);
+
+    if (Math.max(dx, dy) > UPGRADE_RANGE) {
+        return false;
+    }
+
+    if (collectHarvestSlotKeys(creep.room).has(`${creep.pos.x},${creep.pos.y}`)) {
+        return false;
+    }
+
+    // Клетка рождения — не запрет: спавн от неё страдает только тогда, когда
+    // свободных клеток в кольце не осталось, а этим занимается отдельная
+    // проверка в `room.ts` ({@link ensureSpawnRingReserve}). Запрещать здесь
+    // апгрейд опасно: в E34S53 апгрейдер оказывался заперт в «кармане» у
+    // спавна (единственный выход вёл через клетку, занятую другим крипом) и
+    // не мог ни уйти, ни апгрейдить — контроллер снова замирал.
+
+    return creep.upgradeController(controller) === OK;
+}
 
 /**
  * Возвращает клетку, с которой крипу удобно апгрейдить контроллер, и
@@ -40,13 +116,29 @@ function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
     const room = creep.room;
     const cached = creep.memory._upgradeSpot;
 
-    if (cached && cached.roomName === room.name) {
-        const busy = room.find(FIND_CREEPS, {
-            filter: (c) =>
-                c.name !== creep.name && c.pos.x === cached.x && c.pos.y === cached.y
-        });
+    if (
+        cached &&
+        cached.roomName === room.name &&
+        creep.memory._upgradeSpotVersion === UPGRADE_SPOT_VERSION
+    ) {
+        const built =
+            room.find(FIND_STRUCTURES, {
+                filter: (s) => s.pos.x === cached.x && s.pos.y === cached.y
+            }).length > 0 ||
+            room.find(FIND_CONSTRUCTION_SITES, {
+                filter: (s) => s.pos.x === cached.x && s.pos.y === cached.y
+            }).length > 0;
 
-        if (busy.length === 0) {
+        // Кэш живёт дольше одного вызова: за это время клетку могли занять
+        // другой крип, построить на ней расширение или закрыть стройкой.
+        // Проверяем все три случая — иначе апгрейдер ходил бы в
+        // недостижимую клетку, не апгрейдя контроллер.
+        //
+        // Занятый живым крипом кэш НЕ обнуляем: крип подвижен, клетка
+        // освободится, а обнуление кэша означало бы пересчёт клетки
+        // апгрейда каждый тик (PathFinder стоит CPU, а клетка всё равно
+        // та же самая).
+        if (!built && !isReservedTile(room, cached.x, cached.y)) {
             return new RoomPosition(cached.x, cached.y, cached.roomName);
         }
     }
@@ -55,8 +147,10 @@ function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
 
     if (spot) {
         creep.memory._upgradeSpot = { x: spot.x, y: spot.y, roomName: spot.roomName };
+        creep.memory._upgradeSpotVersion = UPGRADE_SPOT_VERSION;
     } else {
         delete creep.memory._upgradeSpot;
+        delete creep.memory._upgradeSpotVersion;
     }
 
     return spot;
@@ -96,6 +190,14 @@ function runDonorMode(creep: Creep): void {
     }
 
     creep.memory.upgrading = true;
+
+    // Уже в зоне апгрейда — апгрейдим немедленно. Дорога до «идеальной»
+    // клетки съедает больше энергии, чем сам апгрейд: в E34S53 апгрейдер
+    // шёл пятнадцать клеток к клетке (16,25) и не доходил, и контроллер
+    // не получал ни единицы прогресса.
+    if (tryUpgradeInPlace(creep)) {
+        return;
+    }
 
     const spot = ensureUpgradeSpot(creep);
 
@@ -149,6 +251,10 @@ export function run(creep: Creep): void {
     }
 
     if (creep.memory.upgrading) {
+        if (tryUpgradeInPlace(creep)) {
+            return;
+        }
+
         upgradeRoomController(creep, {
             visualizePathStyle: { stroke: '#00ff00' }
         });
