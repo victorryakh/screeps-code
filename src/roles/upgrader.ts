@@ -28,6 +28,7 @@ import {
     isSourceSaturated,
     moveCached,
     blocksBirthRing,
+    findFreeTileNear,
     collectHarvestSlotKeys
 } from '../utilities';
 import { UPGRADE_RANGE, UPGRADE_SPOT_VERSION } from '../constants';
@@ -50,6 +51,36 @@ function isReservedTile(room: Room, x: number, y: number): boolean {
 }
 
 /**
+ * Проверяет, есть ли рядом свободная клетка, на которую можно уйти с кольца
+ * рождения.
+ *
+ * @param room  Комната.
+ * @param creep Крип, который ищет, куда отойти.
+ * @returns `true`, если отойти есть куда.
+ */
+function canStepOffBirthRing(room: Room, creep: Creep): boolean {
+    const reserved = new Set<string>();
+
+    for (const spawn of room.find(FIND_MY_SPAWNS)) {
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                if (dx === 0 && dy === 0) {
+                    continue;
+                }
+
+                reserved.add(`${spawn.pos.x + dx},${spawn.pos.y + dy}`);
+            }
+        }
+    }
+
+    for (const key of collectHarvestSlotKeys(room)) {
+        reserved.add(key);
+    }
+
+    return findFreeTileNear(room, creep.pos, reserved, 2) !== null;
+}
+
+/**
  * Апгрейдит контроллер «здесь и сейчас», если крип уже в зоне апгрейда.
  *
  * @remarks
@@ -62,6 +93,14 @@ function isReservedTile(room: Room, x: number, y: number): boolean {
  *
  * На клетке добычи апгрейдить нельзя: она принадлежит харвестерам, и
  * занять её — значит отнять у комнаты треть дохода.
+ *
+ * Клетка рождения — другое дело: там апгрейд разрешён. В E34S53 крип,
+ * запертый в «кармане» у спавна, был в зоне апгрейда, но правило «не стоять
+ * на кольце рождения» запрещало ему апгрейдить — и контроллер снова замер.
+ * Кольцом рождения занимается отдельная проверка в `room.ts`
+ * ({@link ensureSpawnRingReserve}), которая сдвигает крипов с кольца, когда
+ * это возможно; запрещать апгрейд из-за клетки нельзя — иначе запертый
+ * крип просто не работает.
  *
  * @param creep Крип-апгрейдер.
  * @returns `true`, если контроллер был апгрейднут.
@@ -82,7 +121,20 @@ function tryUpgradeInPlace(creep: Creep): boolean {
     if (Math.max(dx, dy) > UPGRADE_RANGE) {
         return false;
     }
-    if (isReservedTile(creep.room, creep.pos.x, creep.pos.y)) {
+
+    if (collectHarvestSlotKeys(creep.room).has(`${creep.pos.x},${creep.pos.y}`)) {
+        return false;
+    }
+
+    // Клетка рождения: уйти с неё лучше (спавну нужна клетка), но если уйти
+    // некуда — работаем здесь. Иначе контроллер замирает: в E34S53 апгрейдер
+    // был заперт в «кармане» у спавна, единственный выход из которого вёл
+    // через клетку, занятую другим крипом, — и он не мог ни уйти, ни
+    // апгрейдить.
+    if (
+        blocksBirthRing(creep.room, creep.pos.x, creep.pos.y) &&
+        canStepOffBirthRing(creep.room, creep)
+    ) {
         return false;
     }
 
