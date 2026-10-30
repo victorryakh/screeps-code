@@ -897,6 +897,27 @@ function actions(creep, kind) {
         JSON.stringify(claims));
 }
 
+// --- Scenario 16: the claim follows the tile the harvester digs on --------
+// The claim is made when the creep starts moving, so it can lag behind the
+// reality: a harvester digs on (20,24) while claiming (20,23). Then the
+// cell it actually occupies looks free to everybody, another harvester comes
+// for it, and the two fight over the same spot.
+{
+    const sim = makeRoom({
+        creeps: [[20, 24, 'harvester', 0]]
+    });
+
+    sim.creeps[0].memory._harvestTile = { x: 20, y: 23 };
+
+    runTicks(sim, 1);
+
+    const tile = sim.creeps[0].memory._harvestTile;
+
+    check('the harvest tile claim follows the tile the creep digs on',
+        tile && tile.x === 20 && tile.y === 24,
+        JSON.stringify(sim.creeps[0].memory._harvestTile));
+}
+
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length === 0 ? 0 : 1);
