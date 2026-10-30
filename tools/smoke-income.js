@@ -918,6 +918,29 @@ function actions(creep, kind) {
         JSON.stringify(sim.creeps[0].memory._harvestTile));
 }
 
+// --- Scenario 17: the upgrader can move on swamp --------------------------
+// A creep with one MOVE part moves half a tile per tick on swamp and spends
+// half of its life in fatigue. The upgrader walks to its donor and back, so
+// on swamp it spent more time walking than upgrading - and the controller
+// stood still for dozens of ticks at a time.
+{
+    // The room is RCL 3 with three harvesters already, so the bot spawns an
+    // upgrader and the attempt records its body.
+    const sim = makeRoom({
+        creeps: [[20, 22, 'harvester', 0], [20, 23, 'harvester', 0], [20, 24, 'harvester', 0]],
+        spawnEnergy: 400
+    });
+
+    runTicks(sim, 1);
+
+    const attempt = sim.spawnAttempts.find((a) => a.role === 'upgrader');
+    const body = attempt ? attempt.body : [];
+
+    check('the upgrader has two MOVE parts from RCL 2 on',
+        body.filter((p) => p === 'move').length === 2,
+        JSON.stringify(body));
+}
+
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length === 0 ? 0 : 1);

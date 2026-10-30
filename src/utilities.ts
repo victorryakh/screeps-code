@@ -109,7 +109,7 @@ export function bodyCost(body: BodyPartConstant[]): number {
  *             в `Memory.creeps`. Для неизвестной роли возвращается
  *             минимальное тело `[WORK, CARRY, MOVE]`.
  */
-export function bodyFor(role: string): BodyPartConstant[] {
+export function bodyFor(role: string, rcl: number = 1): BodyPartConstant[] {
     switch (role) {
         case ROLE.HARVESTER:
             // Тело харвестера подобрано под реальную геометрию комнаты:
@@ -124,7 +124,19 @@ export function bodyFor(role: string): BodyPartConstant[] {
             return [WORK, CARRY, CARRY, MOVE, MOVE];
 
         case ROLE.UPGRADER:
-            return [WORK, WORK, CARRY, MOVE];
+            // Второй MOVE нужен на болоте: крип с одним MOVE ползёт по
+            // полклетки за тик и половину времени стоит в усталости.
+            // Апгрейдер ходит за энергией к донору и обратно к контроллеру,
+            // и на болоте без второго MOVE он в дороге проводит больше
+            // времени, чем качает контроллер. В E34S53 контроллер из-за
+            // этого простаивал десятки тиков подряд: апгрейдер стоял в
+            // усталости на клетке добычи, а прогресс не капал.
+            //
+            // Но на RCL 1 доступно ровно 300 энергии за спавн (расширений
+            // на RCL 1 ещё нет), и свежая комната не должна остаться без
+            // апгрейдера. Поэтому второй MOVE берём с RCL 2, где лимит
+            // расширений уже позволяет профинансировать тело.
+            return rcl >= 2 ? [WORK, WORK, CARRY, MOVE, MOVE] : [WORK, WORK, CARRY, MOVE];
 
         case ROLE.BUILDER:
             return [WORK, CARRY, CARRY, MOVE, MOVE];
