@@ -244,8 +244,9 @@ function makeCreep(x, y, role, energy) {
             this.actions.push(['transfer', target.pos.x, target.pos.y]);
             return ERR_NOT_IN_RANGE;
         },
-        moveTo(target) {
-            this.actions.push(['moveTo', target.x, target.y]);
+        moveTo(target, opts) {
+            const p = target.pos || target;
+            this.actions.push(['moveTo', p.x, p.y, opts && opts.range]);
             return OK;
         },
         say(msg) { this.actions.push(['say', msg]); },
@@ -752,6 +753,148 @@ function actions(creep, kind) {
     check('the extensions are planned next to the harvest tiles',
         nearSource.length > 0,
         JSON.stringify(planned));
+}
+
+// --- Scenario 11: the harvester delivers from the tile it stands on -------
+// The extension next to the harvest tile (21,24) holds only 10 free energy,
+// the spawn holds 190. The old rate model preferred the spawn: it is closer
+// by straight line and takes more energy, so the harvester walked to it -
+// across the birth ring around the spawn. The bot then pushed the harvester
+// off the ring (the ring reserve), the harvester came back, and the room
+// spent two thirds of its life walking instead of digging.
+//
+// The rule now: a storage next to the harvest tile wins, because the energy
+// is handed over without leaving the tile.
+{
+    const sim = makeRoom({
+        extensions: [[21, 24, 40]],
+        creeps: [[20, 24, 'harvester', 100]]
+    });
+
+    runTicks(sim, 1);
+
+    const harvester = sim.creeps[0];
+    const transfers = actions(harvester, 'transfer');
+
+    check('the harvester hands the energy over from the harvest tile',
+        transfers.length > 0 && transfers[0][1] === 21 && transfers[0][2] === 24,
+        JSON.stringify(harvester.actions));
+    const moves = actions(harvester, 'moveTo');
+
+    check('the harvester does not walk to a farther storage for the same energy',
+        moves.length === 0 || (moves[0][1] === 21 && moves[0][2] === 24),
+        JSON.stringify(harvester.actions));
+}
+
+// --- Scenario 12: the harvester approaches a storage to within range 1 ----
+// `moveTo` without `range` builds a path onto the tile of the structure
+// itself. A creep cannot stand there, so the last step never happens and
+// the harvester stands next to the spawn with a full backpack.
+{
+    const sim = makeRoom({
+        creeps: [[20, 24, 'harvester', 100]]
+    });
+
+    runTicks(sim, 1);
+
+    const harvester = sim.creeps[0];
+    const moves = actions(harvester, 'moveTo');
+
+    check('the harvester approaches the storage to within range 1',
+        moves.length > 0 && moves[0][3] === 1,
+        JSON.stringify(harvester.actions));
+}
+
+// --- Scenario 13: the ring reserve sends the workers back to work ---------
+// The ring around the spawn is a trap in a tight room: three creeps stand on
+// it, the bot wants two free cells, so it pushes the workers off. Pushing
+// them onto a random free tile means they wander and never dig again. They
+// have to go back to the tile where they work.
+{
+    const sim = makeRoom({
+        creeps: [[19, 25, 'upgrader', 0], [19, 27, 'upgrader', 0], [20, 26, 'upgrader', 0]]
+    });
+
+    runTicks(sim, 2);
+
+    const targets = sim.creeps.map((c) =>
+        actions(c, 'moveTo').map((m) => `${m[1]},${m[2]}`).join('|')
+    );
+
+    // The upgrader must land on a cell from which the controller is still
+    // reachable - the upgrade range is 3 - and not back on the birth ring.
+    // The nearest free cell is (21,24), four cells from the controller: an
+    // upgrader standing there stops upgrading altogether.
+    const ring = new Set([
+        '18,25', '18,26', '18,27', '19,25', '19,27', '20,25', '20,26', '20,27'
+    ]);
+    const usable = targets.some((t) => {
+        if (!t) {
+            return false;
+        }
+
+        const [x, y] = t.split(',').map(Number);
+
+        return !ring.has(`${x},${y}`) && Math.max(Math.abs(x - 17), Math.abs(y - 24)) <= 3;
+    });
+
+    check('the ring reserve keeps the upgrader able to upgrade',
+        usable,
+        JSON.stringify(targets));
+}
+
+// --- Scenario 14: the extension plan is bounded by the room's income ------
+// The RCL limit of E34S53 is 20 extensions. The room earns ~2 energy per
+// tick, and one extension costs 3000 - fifteen hundred ticks of income. A
+// plan built on the RCL limit means nine construction sites the room can
+// never build: they eat the RCL limit and hold the birth ring forever.
+{
+    const sim = makeRoom({
+        creeps: [[21, 21, 'harvester', 0]]
+    });
+
+    sim.room.memory._incomeRate = 2;
+    sim.room.createConstructionSite = function (x, y, structureType) {
+        createdSites.push([x, y, structureType]);
+        return OK;
+    };
+
+    const before = createdSites.length;
+
+    runTicks(sim, 1);
+
+    const planned = createdSites.length - before;
+
+    check('the extension plan is bounded by the income of the room',
+        planned > 0 && planned <= 2,
+        `planned=${planned}`);
+}
+
+// --- Scenario 15: two harvesters never claim the same harvest tile -------
+// The claim on a harvest tile is made when the creep starts moving, not when
+// it arrives. So before it arrives two creeps can claim the same tile: one
+// digs, the other stands next to the source with an empty backpack. In
+// E34S53 that cost the room a third of its income - the source gave 2
+// energy per tick instead of 6.
+{
+    const sim = makeRoom({
+        creeps: [[19, 25, 'harvester', 0], [20, 26, 'harvester', 0]]
+    });
+
+    // Both creep towards the same tile - neither stands on it yet.
+    sim.creeps[0].memory._harvestTile = { x: 20, y: 23 };
+    sim.creeps[1].memory._harvestTile = { x: 20, y: 23 };
+
+    runTicks(sim, 1);
+
+    const claims = sim.creeps.map((c) => {
+        const t = c.memory._harvestTile;
+        return t ? `${t.x},${t.y}` : '-';
+    });
+
+    check('two harvesters do not claim the same harvest tile',
+        claims[0] !== claims[1],
+        JSON.stringify(claims));
 }
 
 const failed = results.filter((r) => !r.ok);

@@ -20,12 +20,15 @@ import {
     CREEP_LIFE_TICKS,
     INCOME_SAMPLE_INTERVAL,
     DELIVERY_DISTANCE_THRESHOLD,
-    DELIVERY_CHECK_INTERVAL
+    DELIVERY_CHECK_INTERVAL,
+    EXTENSION_BUILD_COST,
+    EXTENSION_PAYBACK_TICKS
 } from './constants';
 import { trySpawn } from './spawn';
 import {
     inspectSpawnRing,
     findFreeTileNear,
+    findUpgradeSpot,
     collectHarvestSlots,
     collectHarvestSlotKeys,
     collectDeliveryTileKeys,
@@ -89,7 +92,7 @@ export function run(room: Room): void {
         homeCreeps.push(creep);
     }
 
-    const layout = planBaseLayout(room);
+    const layout = planBaseLayout(room, affordableExtensions(room, counts));
     if (layout.enabled) {
         ensureExtensions(room, layout);
     }
@@ -629,7 +632,11 @@ function ensureSpawnRingReserve(room: Room): void {
         // клетка — ровно столько, чтобы спавн произвёл одного крипа и
         // запечатался навсегда: второму крипу места уже не было бы.
         if (ring.freeTilesWithoutCreeps >= SPAWN_BIRTH_TILES_CRITICAL) {
-            const moved = moveCreepsOffBirthTiles(room, spawn, ring);
+            // Сдвигаем ровно столько крипов, сколько не хватает до нормы:
+            // каждый сдвинутый крип на время теряет свою работу, а лишних
+            // движений делать не нужно.
+            const needed = SPAWN_BIRTH_TILES_CRITICAL - ring.freeTiles.length;
+            const moved = moveCreepsOffBirthTiles(room, spawn, ring, needed);
 
             if (moved > 0) {
                 log.warn(
@@ -759,26 +766,7 @@ function computeWorkBudget(room: Room, counts: Record<string, number>): number {
 
     room.memory._budgetCheckTick = Game.time;
 
-    const source = room.find(FIND_SOURCES)[0];
-    const slots = source ? collectHarvestSlots(room, source).length : 0;
-    const harvesters = counts[ROLE.HARVESTER] || 0;
-
-    // Модельный доход: клетки добычи × 2 энергии за тик на 1 WORK × потери на
-    // доставке. Это верхняя граница, а не оценка.
-    const modelIncome =
-        Math.min(slots, harvesters) * HARVEST_RATE_PER_WORK * HARVEST_EFFICIENCY;
-
-    // Реальный доход: сколько энергии харвестеры фактически принесли в
-    // структуры за последний интервал (см. `updateIncomeRate`).
-    //
-    // Модель завышала доход втрое: она не учитывала ни время на дорогу, ни
-    // то, что в E34S53 все три клетки добычи лежат на болоте, ни то, что
-    // доставка идёт через десять клеток в обход стенного блока. Бот
-    // считал, что у комнаты есть 4.2 энергии в тик, и держал апгрейдера с
-    // билдером (3 энергии в тик) — комната жила в долг и выедала запас.
-    const measuredIncome = room.memory._incomeRate ?? 0;
-
-    const income = measuredIncome > 0 ? measuredIncome : modelIncome;
+    const income = effectiveIncome(room, counts);
 
     let churn = 0;
 
@@ -789,6 +777,70 @@ function computeWorkBudget(room: Room, counts: Record<string, number>): number {
     room.memory._workBudget = Math.max(0, income - churn);
 
     return room.memory._workBudget;
+}
+
+/**
+ * Эффективный доход комнаты в энергии за тик: измеренный, а если замера ещё
+ * нет — модельный.
+ *
+ * @remarks
+ * Модель (клетки добычи × 2 энергии за тик × потери на доставке) — это
+ * верхняя граница: она не учитывает ни время на дорогу, ни болото, ни
+ * длину рейса. Поэтому, как только замер состоялся, он заменяет модель.
+ *
+ * @param room   Комната.
+ * @param counts Текущий состав ролей комнаты.
+ * @returns Доход в энергии за тик.
+ */
+function effectiveIncome(room: Room, counts: Record<string, number>): number {
+    const source = room.find(FIND_SOURCES)[0];
+    const slots = source ? collectHarvestSlots(room, source).length : 0;
+    const harvesters = counts[ROLE.HARVESTER] || 0;
+
+    const modelIncome =
+        Math.min(slots, harvesters) * HARVEST_RATE_PER_WORK * HARVEST_EFFICIENCY;
+
+    const measuredIncome = room.memory._incomeRate ?? 0;
+
+    return measuredIncome > 0 ? measuredIncome : modelIncome;
+}
+
+/**
+ * Сколько расширений комната может оплатить своим доходом.
+ *
+ * @remarks
+ * Расширение стоит 3000 энергии — в комнате с доходом в 2 энергии за тик
+ * это полторы тысячи тиков дохода, то есть в несколько раз больше всего
+ * запаса комнаты. Планировать расширения по лимиту RCL — значит заказать
+ * стройки, которые комната не выполнит: площадки висят, занимают лимит RCL
+ * и клетки, а билдер (если он появится) тратит доход на постройки вместо
+ * апгрейда контроллера.
+ *
+ * Поэтому число расширений, которое комната может себе позволить, считается
+ * из дохода: расширение должно окупаться за {@link EXTENSION_PAYBACK_TICKS}
+ * тиков. Практически это «не больше расширений, чем комната зарабатывает
+ * энергии в тик».
+ *
+ * Нижняя граница — одно расширение: без него харвестеру некуда сдавать
+ * энергию, кроме спавна, и рейс удлиняется.
+ *
+ * @param room   Комната.
+ * @param counts Текущий состав ролей комнаты.
+ * @returns Максимальное число расширений, которое комната может оплатить.
+ */
+function affordableExtensions(room: Room, counts: Record<string, number>): number {
+    const income = effectiveIncome(room, counts);
+
+    if (income <= 0) {
+        // Дохода нет совсем — ограничивать нечем.
+        return Number.POSITIVE_INFINITY;
+    }
+
+    const affordable = Math.floor(
+        (income * EXTENSION_PAYBACK_TICKS) / EXTENSION_BUILD_COST
+    );
+
+    return Math.max(1, affordable);
 }
 
 /**
@@ -1053,33 +1105,67 @@ function ensureSpawnAccessible(room: Room): void {
  * нему не существует), поэтому крип замирает на месте. Если свободна только
  * эта клетка, спавн запечатывается.
  *
+ * Куда сдвигать — не «на любую свободную клетку рядом», а туда, откуда
+ * крип всё ещё полезен: харвестер возвращается на свою клетку добычи
+ * (это один шаг и никакой потери дохода), апгрейдер — на клетку, с которой
+ * виден контроллер. Иначе сдвиг просто ломает работу: в E34S53 рабочих
+ * выгоняло с кольца на клетку, откуда они уже не могли ни добывать, ни
+ * качать контроллер, и кольцо забивалось снова — бесконечный цикл.
+ *
  * Клетки добычи тоже исключаются: сдвинув рабочего крипа на клетку добычи,
  * мы отнимем её у харвестера — а это треть дохода комнаты.
  *
- * @param room  Комната.
- * @param spawn Спавн, вокруг которого ищем занятые клетки.
- * @param ring  Снимок состояния кольца клеток рождения.
+ * @param room     Комната.
+ * @param spawn    Спавн, вокруг которого ищем занятые клетки.
+ * @param ring     Снимок состояния кольца клеток рождения.
+ * @param maxMoves Максимум крипов, которых нужно сдвинуть за этот раз.
  * @returns Сколько крипов получили новую цель.
  */
 function moveCreepsOffBirthTiles(
     room: Room,
     spawn: StructureSpawn,
-    ring: SpawnRingInfo
+    ring: SpawnRingInfo,
+    maxMoves: number = Number.POSITIVE_INFINITY
 ): number {
-    const birthTiles = new Set<string>();
+    const ringTiles = new Set<string>();
 
     for (const tile of ring.birthTiles) {
-        birthTiles.add(`${tile.x},${tile.y}`);
+        ringTiles.add(`${tile.x},${tile.y}`);
     }
 
+    // Клетки добычи не занимаем: сдвинув рабочего крипа на клетку добычи,
+    // мы отнимем её у харвестера — а это треть дохода комнаты.
+    const exclude = new Set<string>(ringTiles);
+
     for (const key of collectHarvestSlotKeys(room)) {
-        birthTiles.add(key);
+        exclude.add(key);
     }
+
+    // Порядок ролей: сначала харвестеры. У них есть своя клетка добычи, и
+    // вернуться на неё стоит одного шага. Апгрейдеру же придётся идти в
+    // другую часть комнаты, и на это время он перестаёт качать контроллер,
+    // поэтому трогать его — последнее дело.
+    const creeps = [...ring.creepsOnBirthTiles].sort((a, b) => {
+        const ra = a.memory.role === ROLE.HARVESTER ? 0 : 1;
+        const rb = b.memory.role === ROLE.HARVESTER ? 0 : 1;
+
+        if (ra !== rb) {
+            return ra - rb;
+        }
+
+        return a.name < b.name ? -1 : 1;
+    });
 
     let moved = 0;
 
-    for (const creep of ring.creepsOnBirthTiles) {
-        const target = findFreeTileNear(room, creep.pos, birthTiles, 4);
+    for (const creep of creeps) {
+        if (moved >= maxMoves) {
+            break;
+        }
+
+        const target =
+            workPositionFor(room, creep, ringTiles) ??
+            findFreeTileNear(room, creep.pos, exclude, 4);
 
         if (!target) {
             continue;
@@ -1091,4 +1177,52 @@ function moveCreepsOffBirthTiles(
     }
 
     return moved;
+}
+
+/**
+ * Рабочая клетка крипа: та, с которой он всё ещё полезен и с которой можно
+ * уйти с кольца рождения без потери работы.
+ *
+ * @remarks
+ * Для харвестера это его клетка добычи: вернуться на неё стоит одного шага,
+ * и доход комнаты не страдает. Для апгрейдера — клетка, с которой виден
+ * контроллер (апгрейд работает с расстояния 3): сдвинувшись с кольца без
+ * такой клетки, он перестанет качать контроллер вовсе.
+ *
+ * @param room      Комната.
+ * @param creep     Крип, стоящий на кольце рождения.
+ * @param ringTiles Клетки кольца рождения (с них крипа сдвигают).
+ * @returns Рабочая клетка или `null`, если её нет.
+ */
+function workPositionFor(
+    room: Room,
+    creep: Creep,
+    ringTiles: Set<string>
+): RoomPosition | null {
+    if (creep.memory.role === ROLE.HARVESTER) {
+        const tile = creep.memory._harvestTile;
+
+        if (tile && !ringTiles.has(`${tile.x},${tile.y}`)) {
+            const busy = room.find(FIND_CREEPS, {
+                filter: (c) =>
+                    c.name !== creep.name && c.pos.x === tile.x && c.pos.y === tile.y
+            });
+
+            if (busy.length === 0) {
+                return new RoomPosition(tile.x, tile.y, room.name);
+            }
+        }
+
+        return null;
+    }
+
+    if (creep.memory.role === ROLE.UPGRADER) {
+        const spot = findUpgradeSpot(room, creep);
+
+        if (spot && !ringTiles.has(`${spot.x},${spot.y}`)) {
+            return spot;
+        }
+    }
+
+    return null;
 }

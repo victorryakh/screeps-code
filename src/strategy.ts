@@ -273,8 +273,17 @@ export interface BaseLayoutDecision {
  * Чистая функция: возвращает параметры планировки базы. Включается с RCL 2;
  * максимальное количество extensions берётся из `CONTROLLER_STRUCTURES`.
  * Не имеет побочных эффектов.
+ *
+ * @param room                   Комната.
+ * @param maxAffordableExtensions Сколько расширений комната может оплатить
+ *                               своим доходом (см. `affordableExtensions` в
+ *                               `room.ts`). `Infinity` — ограничение по
+ *                               деньгам не применяется.
  */
-export function planBaseLayout(room: Room): BaseLayoutDecision {
+export function planBaseLayout(
+    room: Room,
+    maxAffordableExtensions: number = Number.POSITIVE_INFINITY
+): BaseLayoutDecision {
     const rcl = room.controller?.level ?? 0;
 
     if (rcl < 2 || !room.controller) {
@@ -287,7 +296,16 @@ export function planBaseLayout(room: Room): BaseLayoutDecision {
         };
     }
 
-    const maxExtensions = CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION][rcl] ?? 0;
+    // Лимит RCL — это потолок, а не цель: он не учитывает, может ли комната
+    // оплатить расширения. Планировать расширения по лимиту означает
+    // заказать столько строек, сколько комната не в состоянии выполнить:
+    // в E34S53 лимит RCL 4 — это 20 расширений, и бот набрал 11 расширений
+    // и ещё 9 площадок, хотя комната зарабатывает ~2 энергии в тик.
+    const rclLimit = CONTROLLER_STRUCTURES[STRUCTURE_EXTENSION][rcl] ?? 0;
+    const maxExtensions = Math.min(
+        rclLimit,
+        Math.max(0, Math.floor(maxAffordableExtensions))
+    );
 
     return {
         enabled: true,
