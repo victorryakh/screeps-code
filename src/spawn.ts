@@ -44,7 +44,7 @@ export function trySpawn(room: Room, role: string): boolean {
         return false;
     }
 
-    const body = bodyFor(role);
+    const body = bodyFor(role, room.controller?.level ?? 1);
 
     if (!body) {
         return false;
@@ -101,7 +101,7 @@ export function trySpawn(room: Room, role: string): boolean {
  * @returns `true`, если `room.energyCapacityAvailable >= bodyCost(bodyFor(role))`.
  */
 export function canAffordBody(room: Room, role: string): boolean {
-    const body = bodyFor(role);
+    const body = bodyFor(role, room.controller?.level ?? 1);
 
     if (!body) {
         return false;

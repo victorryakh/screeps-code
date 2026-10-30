@@ -5,7 +5,8 @@ import {
     BIRTH_BLOCKING_TYPES,
     WALL_TERRAIN,
     UPGRADE_RANGE,
-    HARVEST_RATE_PER_WORK
+    HARVEST_RATE_PER_WORK,
+    DELIVERY_TARGET_TTL
 } from './constants';
 import { EXPANSION } from './strategy';
 
@@ -108,7 +109,7 @@ export function bodyCost(body: BodyPartConstant[]): number {
  *             в `Memory.creeps`. Для неизвестной роли возвращается
  *             минимальное тело `[WORK, CARRY, MOVE]`.
  */
-export function bodyFor(role: string): BodyPartConstant[] {
+export function bodyFor(role: string, rcl: number = 1): BodyPartConstant[] {
     switch (role) {
         case ROLE.HARVESTER:
             // Тело харвестера подобрано под реальную геометрию комнаты:
@@ -123,7 +124,19 @@ export function bodyFor(role: string): BodyPartConstant[] {
             return [WORK, CARRY, CARRY, MOVE, MOVE];
 
         case ROLE.UPGRADER:
-            return [WORK, WORK, CARRY, MOVE];
+            // Второй MOVE нужен на болоте: крип с одним MOVE ползёт по
+            // полклетки за тик и половину времени стоит в усталости.
+            // Апгрейдер ходит за энергией к донору и обратно к контроллеру,
+            // и на болоте без второго MOVE он в дороге проводит больше
+            // времени, чем качает контроллер. В E34S53 контроллер из-за
+            // этого простаивал десятки тиков подряд: апгрейдер стоял в
+            // усталости на клетке добычи, а прогресс не капал.
+            //
+            // Но на RCL 1 доступно ровно 300 энергии за спавн (расширений
+            // на RCL 1 ещё нет), и свежая комната не должна остаться без
+            // апгрейдера. Поэтому второй MOVE берём с RCL 2, где лимит
+            // расширений уже позволяет профинансировать тело.
+            return rcl >= 2 ? [WORK, WORK, CARRY, MOVE, MOVE] : [WORK, WORK, CARRY, MOVE];
 
         case ROLE.BUILDER:
             return [WORK, CARRY, CARRY, MOVE, MOVE];
@@ -194,6 +207,13 @@ export function harvestEnergy(
         return moveCached(creep, source, moveOpts);
     }
 
+    // Клетка, на которой крип реально копает, и есть его клетка добычи.
+    // Закрепление ставится в момент начала движения, поэтому без этого
+    // обновления закрепление расходится с reality: крип копает на
+    // (20,24), а закреплён за (20,23) — и другой харвестер, который
+    // пришёл на (20,24), не может её занять, хотя она свободна.
+    creep.memory._harvestTile = { x: creep.pos.x, y: creep.pos.y };
+
     return OK;
 }
 
@@ -239,6 +259,17 @@ export function findClosestSource(creep: Creep, activeOnly = false): Source | nu
  *               `undefined` возвращает `ERR_INVALID_TARGET`.
  * @param opts   Опции `MoveToOpts`, пробрасываемые в `moveCached`.
  * @returns `OK`, `ERR_INVALID_TARGET` или код перемещения.
+ *
+ * @remarks
+ * К структуре надо подойти **вплотную**: `moveTo` без `range` строит путь
+ * на клетку самой структуры, а встать на неё крип не может — движок
+ * считает клетку структуры проходимой (так он ищет путь к контроллеру и
+ * источнику), и последний шаг не выполняется. В E34S53 харвестер с
+ * полным рюкзаком целился в спавн и не доходил: путь кончался на клетке
+ * спавна, и сдача энергии не происходила.
+ *
+ * Поэтому путь строится с `range: 1` — до клетки, с которой передача
+ * возможна.
  */
 export function transferEnergy(
     creep: Creep,
@@ -250,7 +281,12 @@ export function transferEnergy(
     }
 
     if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-        return moveCached(creep, target, withCreepsIgnored(opts));
+        const moveOpts = withCreepsIgnored(opts);
+
+        // Подойти вплотную: сдача энергии работает с расстояния 1.
+        moveOpts.range = 1;
+
+        return moveCached(creep, target, moveOpts);
     }
 
     return OK;
@@ -286,6 +322,18 @@ export function transferEnergy(
  * добычи, — и харвестер, сдавший туда энергию, оказывался заперт в
  * кармане без работы. Соседнее с клеткой добычи расширение (вместимость 50)
  * даёт не меньшую скорость и крипа не запирает.
+ *
+ * **Расстояние меряется по пути, а не по прямой.** Это главное условие
+ * выбора: в комнате со стенами рельефа две клетки «по прямой» могут быть
+ * соединены путём в десять клеток, и тогда хранилище с большим запасом
+ * оказывается хуже ближайшего. В E34S53 спавн стоит в «кармане» вокруг
+ * источника: по прямой от клетки добычи до спавна три клетки, по пути —
+ * четыре, и харвестер вставал на кольцо рождения, чтобы сдать туда
+ * энергию. Кольцо забивалось, и бот начинал сдвигать рабочих с клеток
+ * рождения — доход падал, а кольцо забивалось снова.
+ *
+ * Выбранная цель запоминается: пока в ней есть место, харвестер ходит
+ * в одно и то же хранилище (см. {@link DELIVERY_TARGET_TTL}).
  */
 export function findEnergyTransferTarget(
     creep: Creep,
@@ -304,6 +352,19 @@ export function findEnergyTransferTarget(
         return null;
     }
 
+    // Пока в выбранном хранилище есть место, харвестер ходит в него.
+    // Пересчитывать цель каждый тик нельзя: выбор становится неустойчивым,
+    // крип метается между хранилищами и часть энергии остаётся в рюкзаке.
+    const cached = creep.memory._deliveryTarget;
+
+    if (cached && Game.time - cached.tick < DELIVERY_TARGET_TTL) {
+        const found = candidates.find((c) => c.id === cached.id);
+
+        if (found) {
+            return found;
+        }
+    }
+
     const load = Math.max(1, creep.store[RESOURCE_ENERGY]);
     let work = 0;
 
@@ -315,16 +376,30 @@ export function findEnergyTransferTarget(
 
     const harvestRate = Math.max(1, work * HARVEST_RATE_PER_WORK);
 
+    // Хранилище рядом с клеткой добычи — лучший вариант по определению:
+    // харвестер сдаёт энергию, не сходя с клетки (один шаг), и, главное,
+    // не встаёт на кольцо рождения вокруг спавна.
+    //
+    // В E34S53 спавн стоит в «кармане»: подойти к нему можно только по
+    // клеткам кольца рождения. Х��рвестер, выбравший спавн, вставал на
+    // кольцо, бот сдвигал его с кольца, тот возвращался — и круг замыкался:
+    // крип то ходил, то качал, а не добывал. Расширение рядом с клеткой
+    // добычи снимает проблему целиком: сдача энергии происходит с клетки
+    // добычи, шагать никуда не нужно.
+    const deliveryTiles = collectDeliveryTileKeys(room);
+    const near = candidates.filter((c) =>
+        deliveryTiles.has(`${c.pos.x},${c.pos.y}`)
+    );
+
+    const pool = near.length > 0 ? near : candidates;
+
     let best: AnyStoreStructure | null = null;
     let bestRate = 0;
     let bestDistance = Number.POSITIVE_INFINITY;
 
-    for (const candidate of candidates) {
+    for (const candidate of pool) {
         const capacity = Math.min(candidate.store.getFreeCapacity(RESOURCE_ENERGY), load);
-        const distance = Math.max(
-            Math.abs(candidate.pos.x - creep.pos.x),
-            Math.abs(candidate.pos.y - creep.pos.y)
-        );
+        const distance = deliveryPathDistance(creep, candidate);
 
         const rate = capacity / (capacity / harvestRate + 2 * distance);
 
@@ -335,7 +410,53 @@ export function findEnergyTransferTarget(
         }
     }
 
+    if (best) {
+        creep.memory._deliveryTarget = { id: best.id, tick: Game.time };
+    } else {
+        delete creep.memory._deliveryTarget;
+    }
+
     return best;
+}
+
+/**
+ * Расстояние от крипа до хранилища **по пути**, а не по прямой линии.
+ *
+ * @remarks
+ * Путь ищется до клетки, с которой энергию можно сдать (дистанция 1 от
+ * хранилища). Если путь не найден или поиск не удался, берётся расстояние по
+ * прямой — это заведомо заниженная оценка, но она лучше, чем ничего.
+ *
+ * Поиск пути дорог, поэтому он делается не каждый тик: цель доставки
+ * кэшируется в памяти крипа (см. {@link DELIVERY_TARGET_TTL}), а сам
+ * поиск выполняется только когда цель выбирается заново.
+ *
+ * @param creep  Крип-доставщик.
+ * @param target Хранилище.
+ * @returns Длина пути в клетках.
+ */
+function deliveryPathDistance(creep: Creep, target: { pos: RoomPosition }): number {
+    const straight = Math.max(
+        Math.abs(target.pos.x - creep.pos.x),
+        Math.abs(target.pos.y - creep.pos.y)
+    );
+
+    try {
+        const path = PathFinder.search(creep.pos, {
+            pos: target.pos,
+            range: 1
+        });
+
+        if (path && path.path && path.path.length > 0) {
+            // Путь движка начинается с исходной клетки, поэтому длина пути
+            // минус один — это и есть число шагов.
+            return Math.max(0, path.path.length - 1);
+        }
+    } catch {
+        // Путь не нашёлся — падаем на расстояние по прямой.
+    }
+
+    return straight;
 }
 
 /**
@@ -958,6 +1079,19 @@ export function findHarvestTiles(
         }
 
         occupied.add(`${c.pos.x},${c.pos.y}`);
+
+        // Клетка добычи занята, если другой крип **закреплён** за ней, даже
+        // если он ещё идёт к ней. Крепление ставится в момент начала
+        // движения, а не прихода, поэтому одного признака «кто стоит на
+        // клетке» мало: два харвестера закрепляются за одной клеткой,
+        // один доходит и копает, а второй остаётся стоять рядом с
+        // источником с пустым рюкзаком. В E34S53 так терялась треть
+        // дохода комнаты — источник выдавал 2 энергии в тик вместо 6.
+        const claimed = c.memory._harvestTile;
+
+        if (claimed) {
+            occupied.add(`${claimed.x},${claimed.y}`);
+        }
     }
 
     const cached = creep.memory._harvestTile;
