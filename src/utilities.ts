@@ -1,4 +1,4 @@
-import { ROLE, HOME_PATH_TTL, REPAIR_THRESHOLD } from './constants';
+import { ROLE, HOME_PATH_TTL, REPAIR_THRESHOLD, BIRTH_BLOCKING_TYPES, WALL_TERRAIN } from './constants';
 import { EXPANSION } from './strategy';
 
 /**
@@ -327,4 +327,107 @@ export function repairAt(
     }
 
     return OK;
+}
+
+/**
+ * Собирает множество клеток комнаты, занятых объектами, которые не дают
+ * движку поставить рядом со спавном нового крипа.
+ *
+ * @remarks
+ * Список препятствий повторяет `OBSTACLE_OBJECT_TYPES` движка
+ * (`screeps/engine`, `src/processor/intents/spawns/_born-creep.js`):
+ * structures и construction sites из {@link BIRTH_BLOCKING_TYPES}, а также
+ * source/mineral/deposit. Крипы в список не входят: они подвижны, и их
+ * присутствие движок учитывает отдельно.
+ */
+function collectBirthBlockingTiles(room: Room): Set<string> {
+    const blocked = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        if (BIRTH_BLOCKING_TYPES.indexOf(s.structureType) !== -1) {
+            blocked.add(`${s.pos.x},${s.pos.y}`);
+        }
+    }
+
+    for (const c of room.find(FIND_CONSTRUCTION_SITES)) {
+        if (BIRTH_BLOCKING_TYPES.indexOf(c.structureType) !== -1) {
+            blocked.add(`${c.pos.x},${c.pos.y}`);
+        }
+    }
+
+    for (const src of room.find(FIND_SOURCES)) {
+        blocked.add(`${src.pos.x},${src.pos.y}`);
+    }
+
+    for (const m of room.find(FIND_MINERALS)) {
+        blocked.add(`${m.pos.x},${m.pos.y}`);
+    }
+
+    for (const d of room.find(FIND_DEPOSITS)) {
+        blocked.add(`${d.pos.x},${d.pos.y}`);
+    }
+
+    return blocked;
+}
+
+/**
+ * Проверяет, есть ли на клетке дорога.
+ *
+ * @remarks
+ * Дорога — единственное исключение из правила «стена рельефа блокирует
+ * появление крипа»: `_born-creep.js` пропускает стену, если на клетке есть
+ * дорога.
+ */
+function hasRoadAt(room: Room, x: number, y: number): boolean {
+    return room.find(FIND_STRUCTURES, {
+        filter: (s) =>
+            s.structureType === STRUCTURE_ROAD && s.pos.x === x && s.pos.y === y
+    }).length > 0;
+}
+
+/**
+ * Считает свободные клетки в окрестности спавна, в которые движок может
+ * поместить нового крипа.
+ *
+ * @remarks
+ * Движок создаёт крипа на одной из восьми соседних клеток спавна. Если
+ * свободных клеток нет, движок бесконечно откладывает появление крипа, и
+ * спавн остаётся занятым навсегда — колония не может завести ни одного
+ * крипа. Поэтому количество свободных клеток — это не «эстетика», а
+ * условие жизни колонии.
+ *
+ * @param spawn Спавн, окрестность которого проверяется.
+ * @returns Количество клеток, пригодных для появления крипа (0..8).
+ */
+export function countFreeBirthTiles(room: Room, spawn: StructureSpawn): number {
+    const blocked = collectBirthBlockingTiles(room);
+    const terrain = room.getTerrain();
+    let free = 0;
+
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            if (dx === 0 && dy === 0) {
+                continue;
+            }
+
+            const x = spawn.pos.x + dx;
+            const y = spawn.pos.y + dy;
+
+            if (x < 1 || x > 48 || y < 1 || y > 48) {
+                continue;
+            }
+
+            if (blocked.has(`${x},${y}`)) {
+                continue;
+            }
+
+            if (terrain.get(x, y) === WALL_TERRAIN && !hasRoadAt(room, x, y)) {
+                continue;
+            }
+
+            free++;
+        }
+    }
+
+    return free;
 }
