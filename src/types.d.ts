@@ -63,6 +63,18 @@ declare global {
             roomName: string;
         };
         /**
+         * Клетка, с которой крип строит construction site (см.
+         * `findBuildSpot`). Кэш, чтобы не искать место каждый тик. Выбирается
+         * так, чтобы не занимать клетку добычи и не закрывать клетку
+         * рождения.
+         */
+        _buildSpot?: {
+            x: number;
+            y: number;
+            roomName: string;
+            siteId: string;
+        };
+        /**
          * Кэш маршрута, используемый {@link moveCached} для экономии CPU.
          * Содержит путь, конечную точку и момент последнего вычисления; при
          * совпадении координат и `Game.time - time < reusePath` путь
@@ -123,6 +135,18 @@ declare global {
         _budgetCheckTick?: number;
         /** Сколько энергии в тик комната может тратить на работу (см. `computeWorkBudget`). */
         _workBudget?: number;
+        /** Тик последнего замера энергии в источнике комнаты. */
+        _incomeSampleTick?: number;
+        /** Энергия в источнике на момент последнего замера. */
+        _incomeSampleEnergy?: number;
+        /**
+         * Измеренный доход комнаты в энергиях за тик.
+         *
+         * @remarks
+         * Значение, которому доверяет `computeWorkBudget`: модельный расчёт
+         * по числу клеток добычи завышал доход втрое (см. `updateIncomeRate`).
+         */
+        _incomeRate?: number;
         /**
          * `true`, если клеток добычи не хватает на всех харвестеров комнаты.
          *
