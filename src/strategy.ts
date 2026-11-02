@@ -1,5 +1,6 @@
 import {
     ROLE,
+    MAX_HARVESTERS_PER_ROOM,
     DOWNGRADE_BUFFER_TICKS,
     DELIVERY_STAGE_DOWNGRADE_MARGIN,
     EXITS_CACHE_TTL,
@@ -93,15 +94,37 @@ export function getRoomTargets(rcl: number): RoomTargets {
  * @param budget         Бюджет энергии комнаты (в тиках).
  * @param deliveryRepair `true`, если комнате нужно чинить доставку энергии
  *                       (см. {@link needsDeliveryRepair} в `utilities.ts`).
+ * @param harvestSlots   Число клеток добычи у источника комнаты. Столько
+ *                       харвестеров комната может накормить: каждый занимает
+ *                       свою клетку у источника. `0` — неизвестно, берётся
+ *                       значение из таблицы RCL.
  */
 export function planSpawnOrder(
     room: Room,
     counts: Record<string, number>,
     budget = Infinity,
-    deliveryRepair = false
+    deliveryRepair = false,
+    harvestSlots = 0
 ): [RoleKey, number][] {
     const rcl = room.controller?.level ?? 0;
     const targets = getRoomTargets(rcl);
+
+    // Число харвестеров задаёт не таблица RCL, а геометрия комнаты.
+    //
+    // Таблица RCL — это нижняя граница («столько рабочих нужно при обычной
+    // комнате»), а реальный потолок — число клеток добычи у источника:
+    // каждый харвестер занимает ровно одну клетку. Если клеток больше, чем
+    // харвестеров по таблице, комната недобирает энергию: в E34S53 у
+    // источника восемь клеток, а бот держал три харвестера по таблице RCL 4,
+    // выдавая 2.2 энергии в тик — ровно столько, чтобы прокормить замену
+    // умирающих крипов, но не больше.
+    //
+    // Больше клеток добычи — больше энергии — больше бюджет комнаты — больше
+    // апгрейдеров. Связь замкнутая, и разорвать её можно только числом
+    // харвестеров.
+    const slotLimit =
+        harvestSlots > 0 ? Math.max(targets.harvester, harvestSlots) : targets.harvester;
+    const harvesterTarget = Math.min(slotLimit, MAX_HARVESTERS_PER_ROOM);
 
     const canUpgrade = room.controller
         ? room.controller.ticksToDowngrade > DOWNGRADE_BUFFER_TICKS
@@ -158,10 +181,14 @@ export function planSpawnOrder(
 
     if (deliveryStage) {
         builderTarget = Math.min(targets.builder, 1);
+        // Апгрейдер в стадии починки доставки не выбрасывается совсем:
+        // без прогресса контроллера комната не растёт, и починить
+        // доставку будет уже нечем. Один апгрейдер — это минимум, а не
+        // предмет бюджета.
         upgraderTarget = Math.min(
             upgraderTargetByRcl,
             Math.max(
-                0,
+                1,
                 Math.floor(
                     (budget - builderTarget * BUILDER_ENERGY_RATE) /
                         UPGRADER_ENERGY_RATE
@@ -197,7 +224,7 @@ export function planSpawnOrder(
 
     if (needsHarvesterFirst) {
         return [
-            [ROLE.HARVESTER, targets.harvester],
+            [ROLE.HARVESTER, harvesterTarget],
             [ROLE.BUILDER, builderTarget],
             [ROLE.UPGRADER, upgraderTarget],
             [ROLE.REPAIRER, repairerTarget]
@@ -210,14 +237,14 @@ export function planSpawnOrder(
         return [
             [ROLE.BUILDER, builderTarget],
             [ROLE.UPGRADER, upgraderTarget],
-            [ROLE.HARVESTER, targets.harvester],
+            [ROLE.HARVESTER, harvesterTarget],
             [ROLE.REPAIRER, repairerTarget]
         ];
     }
 
     return [
         [ROLE.UPGRADER, upgraderTarget],
-        [ROLE.HARVESTER, targets.harvester],
+        [ROLE.HARVESTER, harvesterTarget],
         [ROLE.BUILDER, builderTarget],
         [ROLE.REPAIRER, repairerTarget]
     ];

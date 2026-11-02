@@ -11,6 +11,7 @@
  * сайты. Если сайтов нет — апгрейдит контроллер.
  * ==========================================================================*/
 
+import { BUILDER_RESERVE_ENERGY } from '../constants';
 import {
     harvestEnergy,
     findClosestSource,
@@ -227,6 +228,24 @@ export function run(creep: Creep): void {
 
                 stepOffHarvestSlots(creep);
                 return;
+            }
+
+            // Билдер берёт энергию из структур комнаты — тех же самых,
+            // из которых берёт апгрейдер. Съесть весь запас нельзя: тогда
+            // апгрейдер останется без энергии и контроллер замрёт. Стройка
+            // идёт, только когда комната может оплатить её целиком и
+            // сохранить запас для рабочих.
+            const pending = findSiteToBuild(creep);
+
+            if (pending) {
+                const remaining = pending.progressTotal - pending.progress;
+
+                if (creep.room.energyAvailable < remaining + BUILDER_RESERVE_ENERGY) {
+                    // Денег пока нет — ждём, но с клетки добычи уходим:
+                    // она принадлежит харвестерам.
+                    stepOffHarvestSlots(creep);
+                    return;
+                }
             }
 
             const donor = findEnergyDonor(creep);

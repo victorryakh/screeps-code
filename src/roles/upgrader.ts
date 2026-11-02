@@ -180,6 +180,13 @@ function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
  * @param creep Крип-апгрейдер.
  */
 function runDonorMode(creep: Creep): void {
+    // В режиме донора крип не добывает: энергию он берёт из структур. Значит,
+    // клетка добычи ему не нужна, и закрепление за ней надо снять — иначе
+    // апгрейдер занимает клетку у источника вхолостую, и харвестер до неё
+    // не доходит. В E34S53 апгрейдер держал закрепление на клетке (20,24),
+    // и третья клетка добычи простаивала.
+    delete creep.memory._harvestTile;
+
     if (creep.store[RESOURCE_ENERGY] === 0) {
         if (creep.memory._excess) {
             // Лишний рабочий не забирает энергию: она нужна тем, кто в

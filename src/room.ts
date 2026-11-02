@@ -19,10 +19,15 @@ import {
     HARVEST_EFFICIENCY,
     CREEP_LIFE_TICKS,
     INCOME_SAMPLE_INTERVAL,
+    INCOME_WINDOW_TICKS,
     DELIVERY_DISTANCE_THRESHOLD,
     DELIVERY_CHECK_INTERVAL,
     EXTENSION_BUILD_COST,
-    EXTENSION_PAYBACK_TICKS
+    EXTENSION_PAYBACK_TICKS,
+    CONTAINER_BUILD_COST,
+    STORAGE_BUILD_COST,
+    DELIVERY_STRUCTURE_CHECK_INTERVAL,
+    BUILDER_RESERVE_ENERGY
 } from './constants';
 import { trySpawn } from './spawn';
 import {
@@ -33,6 +38,9 @@ import {
     collectHarvestSlotKeys,
     collectDeliveryTileKeys,
     hasDeliverySite,
+    hasDeliverySink,
+    deliveryStructureCapacity,
+    findDeliveryStructureSpot,
     measureDeliveryDistance,
     bodyCost,
     type SpawnRingInfo
@@ -97,6 +105,8 @@ export function run(room: Room): void {
         ensureExtensions(room, layout);
     }
 
+    ensureDeliveryStructures(room);
+
     ensureSpawn(room);
     ensureSpawnAccessible(room);
     ensureSpawnRingReserve(room);
@@ -112,7 +122,8 @@ export function run(room: Room): void {
         room,
         counts,
         computeWorkBudget(room, counts),
-        needsDeliveryRepair(room)
+        needsDeliveryRepair(room),
+        collectHarvestSlotKeys(room).size
     );
 
     markExcessWorkers(room, homeCreeps, spawnOrder);
@@ -509,10 +520,173 @@ function updateDeliveryDistance(room: Room): number {
  * @returns `true`, если доставку надо чинить.
  */
 function needsDeliveryRepair(room: Room): boolean {
-    return (
-        updateDeliveryDistance(room) >= DELIVERY_DISTANCE_THRESHOLD &&
-        hasDeliverySite(room)
-    );
+    // Починить доставку нужно, когда у источника нет большого «слива»:
+    // ни контейнера, ни хранилища рядом с клетками добычи. Тогда харвестер
+    // несёт энергию через полкомнаты, и доход падает в разы.
+    //
+    // Прежнее условие (длинная доставка И наличие площадки расширения рядом
+    // с клеткой добычи) было невыполнимо: площадок там не было никогда, а
+    // новые расширения бот больше не заказывает — комната не может их
+    // оплатить. Стадия починки доставки не включалась ни разу.
+    // Метрику поддерживаем в любом случае: по ней судят о доставке и в
+    // других местах (см. `measureDeliveryDistance`).
+    const distance = updateDeliveryDistance(room);
+
+    if (hasDeliverySink(room)) {
+        return false;
+    }
+
+    if (deliveryStructureCapacity(room) <= 0) {
+        return false;
+    }
+
+    if (findDeliveryStructureSpot(room) === null) {
+        return false;
+    }
+
+    // Длинная доставка — главный признак того, что «дырка» действительно
+    // нужна. Если доставка короткая, комнате незачем вкладываться в
+    // контейнер.
+    return distance >= DELIVERY_DISTANCE_THRESHOLD;
+}
+
+/**
+ * Планирует «дырку» для энергии рядом с источником: контейнер, а на
+ * RCL 4 и выше — ещё и хранилище.
+ *
+ * @remarks
+ * Расширение вмещает 50 энергий, а харвестер привозит рюкзак в 100: как
+ * только три расширения у источника забиты, харвестер идёт сдавать
+ * энергию через полкомнаты, и доход падает в разы — дорога занимает столько
+ * же времени, сколько добыча.
+ *
+ * Контейнер стоит 300 энергий и вмещает 1000. Он окупается за несколько
+ * сотен тиков: харвестер начинает сдавать энергию в шаг от источника.
+ *
+ * Заказ площадки — только если комната может оплатить стройку и при этом
+ * не съесть запас рабочих (см. {@link BUILDER_RESERVE_ENERGY}).
+ *
+ * @param room Комната.
+ */
+function ensureDeliveryStructures(room: Room): void {
+    const controller = room.controller;
+
+    if (!controller) {
+        return;
+    }
+
+    const rcl = controller.level;
+
+    if (rcl < 3) {
+        return;
+    }
+
+    if (
+        room.memory._deliveryStructureCheckTick &&
+        Game.time - room.memory._deliveryStructureCheckTick <
+            DELIVERY_STRUCTURE_CHECK_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._deliveryStructureCheckTick = Game.time;
+
+    for (const type of [STRUCTURE_CONTAINER, STRUCTURE_STORAGE]) {
+        const limit = CONTROLLER_STRUCTURES[type]?.[rcl] ?? 0;
+
+        if (!limit) {
+            continue;
+        }
+
+        const built = room.find(FIND_MY_STRUCTURES, {
+            filter: (s) => s.structureType === type
+        }).length;
+        const sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
+            filter: (s) => s.structureType === type
+        }).length;
+
+        if (built + sites >= limit) {
+            continue;
+        }
+
+        const cost =
+            type === STRUCTURE_CONTAINER ? CONTAINER_BUILD_COST : STORAGE_BUILD_COST;
+
+        if (built + sites > 0) {
+            // Уже есть такая «дырка» — вторая не нужна. Но если комната
+            // не может её оплатить, площадка только занимает клетку и
+            // место в лимите RCL: снимаем её.
+            const hopeless = room.energyAvailable < cost + BUILDER_RESERVE_ENERGY;
+
+            if (hopeless) {
+                for (const site of room.find(FIND_MY_CONSTRUCTION_SITES, {
+                    filter: (c) => c.structureType === type
+                })) {
+                    (site as ConstructionSite & { remove?: () => number }).remove?.();
+                }
+            }
+
+            continue;
+        }
+
+        // Покупка должна окупаться. Контейнер в E34S53 стоит 5000 энергий,
+        // а комната зарабатывает несколько в тик и держит запас для
+        // рабочих: такая покупка съела бы запас, и вместо доставки
+        // получился бы замороженный контроллер. Поэтому «дырку» заказываем
+        // только когда комната может оплатить её целиком, не трогая запас.
+        if (room.energyAvailable < cost + BUILDER_RESERVE_ENERGY) {
+            continue;
+        }
+
+        const spot = findDeliveryStructureSpot(room);
+
+        if (!spot) {
+            continue;
+        }
+
+        const result = room.createConstructionSite(spot.x, spot.y, type);
+
+        if (result === OK) {
+            log.info(
+                'room',
+                `planned ${type} at ${spot.x},${spot.y} in ${room.name} — delivery to the source is too long`
+            );
+        }
+
+        return;
+    }
+}
+
+/**
+ * Может ли билдер работать: хватает ли комнате энергии на саму стройку,
+ * сохранив запас для рабочих.
+ *
+ * @param room Комната.
+ * @returns `true`, если билдеру можно брать энергию из структур.
+ */
+function builderCanWork(room: Room): boolean {
+    let remaining = Number.POSITIVE_INFINITY;
+
+    for (const s of room.find(FIND_MY_CONSTRUCTION_SITES)) {
+        if (
+            s.structureType !== STRUCTURE_CONTAINER &&
+            s.structureType !== STRUCTURE_STORAGE
+        ) {
+            continue;
+        }
+
+        if (s.progress >= s.progressTotal) {
+            continue;
+        }
+
+        remaining = Math.min(remaining, s.progressTotal - s.progress);
+    }
+
+    if (!Number.isFinite(remaining)) {
+        return false;
+    }
+
+    return room.energyAvailable >= remaining + BUILDER_RESERVE_ENERGY;
 }
 
 /**
@@ -726,6 +900,19 @@ function markExcessWorkers(
             }
         }
     }
+
+    // Билдер — исключение: он строит «дырку» для энергии, и без него
+    // доставка в комнате останется длинной навсегда. Но работать он может
+    // только если комната оплачивает стройку, не съедая запас рабочих.
+    if (allowed.get(ROLE.BUILDER) === 0 && builderCanWork(room)) {
+        const builders = byRole.get(ROLE.BUILDER) || [];
+
+        if (builders.length > 0) {
+            const keeper = builders[0] as Creep;
+
+            delete keeper.memory._excess;
+        }
+    }
 }
 
 /**
@@ -802,7 +989,15 @@ function effectiveIncome(room: Room, counts: Record<string, number>): number {
 
     const measuredIncome = room.memory._incomeRate ?? 0;
 
-    return measuredIncome > 0 ? measuredIncome : modelIncome;
+    if (measuredIncome <= 0) {
+        return modelIncome;
+    }
+
+    // Замер не может превышать физический предел комнаты: сколько энергии
+    // клетки добычи способны отдать в секунду. Иначе всплеск после
+    // регенерации источника (одним куском 3000) раздул бы бюджет, и комната
+    // завела бы больше рабочих, чем может прокормить.
+    return Math.min(measuredIncome, modelIncome);
 }
 
 /**
@@ -881,6 +1076,8 @@ function updateIncomeRate(room: Room): void {
     if (lastTick === undefined || lastEnergy === undefined) {
         room.memory._incomeSampleTick = now;
         room.memory._incomeSampleEnergy = source.energy;
+        room.memory._incomeWindowTick = now;
+        room.memory._harvested = 0;
         return;
     }
 
@@ -888,21 +1085,61 @@ function updateIncomeRate(room: Room): void {
         return;
     }
 
-    const drained = lastEnergy - source.energy;
+    const current = source.energy;
 
     room.memory._incomeSampleTick = now;
-    room.memory._incomeSampleEnergy = source.energy;
+    room.memory._incomeSampleEnergy = current;
 
-    // Энергия в источнике не уменьшилась: либо ничего не добывали, либо
-    // сработала регенерация. Такой замер ничего не говорит о доходе.
-    if (drained <= 0) {
-        return;
+    // Источник восстанавливается сразу целиком: за один тик его энергия
+    // прыгает с нуля (или с любого остатка) до 3000. Поэтому «сколько
+    // убавилось» между двумя замерами — не всегда «сколько добыли».
+    //
+    // Если энергия источника выросла, значит между замерами был скачок
+    // регенерации, и добыто было 3000 минус остаток. Раньше такие замеры
+    // просто отбрасывались, а это как раз те замеры, где добычи больше
+    // всего: доход комнаты занижался вдвое, бюджет не покрывал и одного
+    // апгрейдера, и колония жила в долг.
+    const harvested =
+        current > lastEnergy
+            ? Math.max(0, SOURCE_ENERGY_CAPACITY - current)
+            : Math.max(0, lastEnergy - current);
+
+    // Окно накопления начинается с прошлого замера, а не с текущего
+    // момента: иначе первое же деление даёт «добычу за один тик» и доход
+    // комнаты на секунду взлетает до сотни.
+    // Окно накопления может остаться незаданным после смены кода: старый
+    // замер не оставил его в памяти. Тогда окно надо начать заново, иначе
+    // деление на один-два тика даёт «добычу за тик» и доход улетает в
+    // потолок.
+    if (room.memory._incomeWindowTick === undefined) {
+        room.memory._incomeWindowTick = lastTick;
+        room.memory._harvested = 0;
     }
 
-    const rate = drained / (now - lastTick);
-    const previous = room.memory._incomeRate ?? 0;
+    const windowStart = room.memory._incomeWindowTick;
 
-    room.memory._incomeRate = previous > 0 ? previous * 0.5 + rate * 0.5 : rate;
+    room.memory._harvested = (room.memory._harvested ?? 0) + harvested;
+
+    const window = now - windowStart;
+
+    // Среднее по накопленному окну: скачки регенерации усредняются, и
+    // оценка не скачет вместе с ними. Пока окно короче
+    // {@link INCOME_WINDOW_TICKS}, это среднее по тому, что уже накоплено.
+    const measured = (room.memory._harvested ?? 0) / Math.max(1, window);
+
+    // Замер не может превышать физический предел комнаты: сколько энергии
+    // способны отдать её клетки добычи. Иначе скачок после регенерации
+    // источника (одним куском в несколько тысяч) раздул бы бюджет, и
+    // комната завела бы больше рабочих, чем может прокормить.
+    const slotCount = collectHarvestSlots(room, source).length;
+    const ceiling = slotCount * HARVEST_RATE_PER_WORK;
+
+    room.memory._incomeRate = Math.min(measured, ceiling);
+
+    if (window >= INCOME_WINDOW_TICKS) {
+        room.memory._harvested = 0;
+        room.memory._incomeWindowTick = now;
+    }
 }
 
 /**
@@ -949,6 +1186,11 @@ function updateSourceSaturation(room: Room, counts: Record<string, number>): voi
     for (const source of room.find(FIND_SOURCES)) {
         slots += collectHarvestSlots(room, source).length;
     }
+
+    // Диагностика: сколько клеток добычи бот видит у источника. От этого
+    // числа зависит число харвестеров (см. `planSpawnOrder`), а значит и
+    // доход комнаты.
+    room.memory._harvestSlots = slots;
 
     room.memory._sourceSaturated = slots > 0 && harvesters >= slots;
 }
