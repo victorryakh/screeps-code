@@ -75,6 +75,30 @@ export function moveCached(
         }
     }
 
+    // «Отравленный» кэш пути.
+    //
+    // Движок хранит последний маршрут в `creep.memory._move` и переиспользует
+    // его в `moveTo`. Если маршрут закончился, а крип не подошёл к цели,
+    // движок отвечает `ERR_NO_PATH` — и отвечает им снова и снова, пока
+    // кэш жив (см. `screeps/engine`, `src/game/creeps.js`: при пустом пути
+    // `moveTo` возвращает `ERR_NO_PATH`, если цель не в радиусе 1). Пустой
+    // путь в кэше означает «маршрута нет» — например, проход перекрыл
+    // другой крип, и путь не нашёлся.
+    //
+    // Такой кэш надо сбрасывать: иначе крип стоит на месте десятки тиков
+    // и ждёт, пока кэш протухнет сам. В E34S53 харвестер с полным рюкзаком
+    // так и стоял у источника, не мог сдать энергию, и комната не получала
+    // ни единицы дохода.
+    if (moveMemory && !moveMemory.path) {
+        delete creep.memory._move;
+
+        // `reusePath: 1` — движок выбросит старый кэш (время кэша уже
+        // прошло) и запишет новый путь. Ноль нельзя: при `reusePath === 0`
+        // движок не запоминает путь вовсе, и каждое движение считало бы
+        // маршрут заново.
+        return creep.moveTo(dest, { ...opts, reusePath: 1 });
+    }
+
     if (opts.reusePath === undefined) {
         // Копия, а не мутация аргумента: иначе `reusePath` залипает в
         // вызывающем коде и «заражает» следующие вызовы с тем же объектом.
@@ -397,9 +421,29 @@ export function findEnergyTransferTarget(
     let bestRate = 0;
     let bestDistance = Number.POSITIVE_INFINITY;
 
+    // Последний вариант: хранилище, до которого не дойти. К нему можно
+    // вернуться, если другого выбора нет, но выбирать его по умолчанию
+    // нельзя — крип будет стоять с полным рюкзаком.
+    let unreachable: AnyStoreStructure | null = null;
+    let unreachableBy = Number.POSITIVE_INFINITY;
+
     for (const candidate of pool) {
         const capacity = Math.min(candidate.store.getFreeCapacity(RESOURCE_ENERGY), load);
         const distance = deliveryPathDistance(creep, candidate);
+
+        if (distance < 0) {
+            const straight = Math.max(
+                Math.abs(candidate.pos.x - creep.pos.x),
+                Math.abs(candidate.pos.y - creep.pos.y)
+            );
+
+            if (straight < unreachableBy) {
+                unreachableBy = straight;
+                unreachable = candidate;
+            }
+
+            continue;
+        }
 
         const rate = capacity / (capacity / harvestRate + 2 * distance);
 
@@ -408,6 +452,10 @@ export function findEnergyTransferTarget(
             bestRate = rate;
             bestDistance = distance;
         }
+    }
+
+    if (!best) {
+        best = unreachable;
     }
 
     if (best) {
@@ -436,11 +484,6 @@ export function findEnergyTransferTarget(
  * @returns Длина пути в клетках.
  */
 function deliveryPathDistance(creep: Creep, target: { pos: RoomPosition }): number {
-    const straight = Math.max(
-        Math.abs(target.pos.x - creep.pos.x),
-        Math.abs(target.pos.y - creep.pos.y)
-    );
-
     try {
         const path = PathFinder.search(creep.pos, {
             pos: target.pos,
@@ -453,10 +496,15 @@ function deliveryPathDistance(creep: Creep, target: { pos: RoomPosition }): numb
             return Math.max(0, path.path.length - 1);
         }
     } catch {
-        // Путь не нашёлся — падаем на расстояние по прямой.
+        // Путь не нашёлся — см. ниже.
     }
 
-    return straight;
+    // Пути нет: до цели не дойти. Раньше здесь возвращалось расстояние по
+    // прямой, и недостижимое хранилище выглядело как «совсем рядом» — а
+    // харвестер выбирал его целью и стоял с полным рюкзаком, не сдавая
+    // энергию. Теперь недостижимость помечается явно (-1), и выбирать такую
+    // цель можно только если другой нет.
+    return -1;
 }
 
 /**
@@ -1401,6 +1449,133 @@ export function hasDeliverySite(room: Room): boolean {
     }
 
     return false;
+}
+
+/**
+ * Есть ли рядом с клетками добычи «большая дырка» для энергии: контейнер
+ * или хранилище.
+ *
+ * @remarks
+ * Расширение вмещает 50 энергий, а харвестер привозит рюкзак в 100. Как
+ * только три расширения у источника забиты, харвестер несёт энергию в
+ * другой конец комнаты — и доход падает в разы: дорога занимает столько же
+ * времени, сколько добыча.
+ *
+ * Контейнер (300 энергии) или хранилище (3000) стоят рядом с клеткой
+ * добычи и вмещают 1000: харвестер сдаёт энергию в шаг от источника и
+ * возвращается за следующей порцией.
+ *
+ * @param room Комната.
+ * @returns `true`, если рядом с клетками добычи есть контейнер или хранилище.
+ */
+export function hasDeliverySink(room: Room): boolean {
+    const delivery = collectDeliveryTileKeys(room);
+
+    if (delivery.size === 0) {
+        return false;
+    }
+
+    for (const s of room.find(FIND_MY_STRUCTURES)) {
+        const type = s.structureType as string;
+
+        if (type !== STRUCTURE_CONTAINER && type !== STRUCTURE_STORAGE) {
+            continue;
+        }
+
+        if (delivery.has(`${s.pos.x},${s.pos.y}`)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Сколько контейнеров и хранилищ комната может построить по лимиту RCL.
+ *
+ * @param room Комната.
+ * @returns Сколько ещё «дырок» для энергии можно заказать.
+ */
+export function deliveryStructureCapacity(room: Room): number {
+    const controller = room.controller;
+
+    if (!controller) {
+        return 0;
+    }
+
+    const rcl = controller.level;
+    let capacity = 0;
+
+    for (const type of [STRUCTURE_CONTAINER, STRUCTURE_STORAGE]) {
+        const limit = CONTROLLER_STRUCTURES[type]?.[rcl] ?? 0;
+
+        if (!limit) {
+            continue;
+        }
+
+        const built = room.find(FIND_MY_STRUCTURES, {
+            filter: (s) => s.structureType === type
+        }).length;
+        const sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
+            filter: (s) => s.structureType === type
+        }).length;
+
+        capacity += Math.max(0, limit - built - sites);
+    }
+
+    return capacity;
+}
+
+/**
+ * Находит свободную клетку рядом с клетками добычи под контейнер или
+ * хранилище.
+ *
+ * @remarks
+ * Клетка доставки — та, с которой энергию можно сдать, не сходя с клетки
+ * добычи. Кольцо рождения вокруг спавна исключается: контейнер там занял бы
+ * клетку, в которую движок ставит нового крипа, и запечатал бы спавн.
+ *
+ * @param room Комната.
+ * @returns Клетка или `null`, если подходящей нет.
+ */
+export function findDeliveryStructureSpot(room: Room): { x: number; y: number } | null {
+    const delivery = collectDeliveryTileKeys(room);
+    const occupied = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const c of room.find(FIND_CONSTRUCTION_SITES)) {
+        occupied.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    const terrain = room.getTerrain();
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+
+    for (const key of delivery) {
+        const [x, y] = key.split(',').map(Number);
+
+        if (x === undefined || y === undefined) {
+            continue;
+        }
+
+        if (occupied.has(key)) {
+            continue;
+        }
+
+        if (terrain.get(x, y) === WALL_TERRAIN) {
+            continue;
+        }
+
+        if (spawn && blocksBirthRing(room, x, y)) {
+            continue;
+        }
+
+        return { x, y };
+    }
+
+    return null;
 }
 
 /**

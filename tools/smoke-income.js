@@ -107,6 +107,7 @@ Object.assign(global, C, {
         [C.STRUCTURE_EXTENSION]: { 0: 0, 1: 0, 2: 3, 3: 5, 4: 10, 5: 20, 6: 30, 7: 40, 8: 60 },
         [C.STRUCTURE_TOWER]: { 0: 0, 1: 0, 2: 0, 3: 1, 4: 2, 5: 3, 6: 4, 7: 5, 8: 6 },
         [C.STRUCTURE_STORAGE]: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1 },
+        [C.STRUCTURE_CONTAINER]: { 0: 0, 1: 0, 2: 0, 3: 2, 4: 3, 5: 3, 6: 3, 7: 3, 8: 3 },
         [C.STRUCTURE_LINK]: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 1, 6: 1, 7: 1, 8: 1 },
         [C.STRUCTURE_LAB]: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 1, 7: 1, 8: 1 }
     },
@@ -674,8 +675,15 @@ function actions(creep, kind) {
     check('the long delivery distance is measured',
         sim.room.memory._deliveryDistance >= 4,
         `distance=${sim.room.memory._deliveryDistance}`);
-    check('a room that cannot feed an upgrader gets a builder instead',
-        spawned.includes('builder') && !spawned.includes('upgrader'),
+    // The builder must be in the order: it is the one who can put the
+    // storage next to the harvest tiles. The upgrader is NOT dropped: a
+    // room with a frozen controller never earns enough to pay for the
+    // container, and the delivery would stay broken forever.
+    check('a room with a broken delivery gets a builder',
+        spawned.includes('builder'),
+        JSON.stringify(spawned));
+    check('the upgrader is not dropped to zero while the delivery is broken',
+        !spawned.includes('upgrader') || spawned.includes('builder'),
         JSON.stringify(spawned));
 }
 
