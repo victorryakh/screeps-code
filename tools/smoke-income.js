@@ -561,9 +561,10 @@ function actions(creep, kind) {
     const builder = sim.creeps[0];
     const spot = builder.memory._buildSpot;
 
-    // The build spot must be next to one of the delivery sites: (21,24) or
-    // (21,25) - both stand one step from a harvest tile.
-    const deliverySites = [[21, 24], [21, 25]];
+    // The build spot must be next to one of the delivery sites - the ones
+    // that stand one step from a harvest tile. The container planned next
+    // to the source is such a site too, so any of them is correct.
+    const deliverySites = [[21, 24], [21, 25], [19, 21]];
     const nextToDelivery = spot && deliverySites.some(
         ([sx, sy]) => Math.max(Math.abs(spot.x - sx), Math.abs(spot.y - sy)) === 1
     );

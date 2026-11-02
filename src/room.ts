@@ -609,13 +609,23 @@ function ensureDeliveryStructures(room: Room): void {
             continue;
         }
 
-        const cost =
-            type === STRUCTURE_CONTAINER ? CONTAINER_BUILD_COST : STORAGE_BUILD_COST;
-
-        if (room.energyAvailable < cost + BUILDER_RESERVE_ENERGY) {
-            // Денег нет: ждём, пока комната накопит. Торопиться нельзя —
-            // съев запас, мы остановим апгрейд контроллера.
+        if (type === STRUCTURE_CONTAINER && built + sites > 0) {
+            // Один контейнер у источника решают задачу доставки; три
+            // контейнера — это уже роскошь, на которую у комнаты нет денег.
             continue;
+        }
+
+        if (type === STRUCTURE_STORAGE) {
+            // Хранилище — дорогая покупка (3000 энергий). Заказываем его
+            // только когда комната может его оплатить, не съев запас
+            // рабочих.
+            if (built + sites > 0) {
+                continue;
+            }
+
+            if (room.energyAvailable < STORAGE_BUILD_COST + BUILDER_RESERVE_ENERGY) {
+                continue;
+            }
         }
 
         const spot = findDeliveryStructureSpot(room);
@@ -1084,7 +1094,10 @@ function updateIncomeRate(room: Room): void {
             ? Math.max(0, SOURCE_ENERGY_CAPACITY - current)
             : Math.max(0, lastEnergy - current);
 
-    const windowStart = room.memory._incomeWindowTick ?? now;
+    // Окно накопления начинается с прошлого замера, а не с текущего
+    // момента: иначе первое же деление даёт «добычу за один тик» и доход
+    // комнаты на секунду взлетает до сотни.
+    const windowStart = room.memory._incomeWindowTick ?? lastTick;
 
     room.memory._harvested = (room.memory._harvested ?? 0) + harvested;
 
