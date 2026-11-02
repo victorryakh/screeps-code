@@ -6,7 +6,8 @@ import {
     WALL_TERRAIN,
     UPGRADE_RANGE,
     HARVEST_RATE_PER_WORK,
-    DELIVERY_TARGET_TTL
+    DELIVERY_TARGET_TTL,
+    DELIVERY_FATIGUE_FACTOR
 } from './constants';
 import { EXPANSION } from './strategy';
 
@@ -445,7 +446,15 @@ export function findEnergyTransferTarget(
             continue;
         }
 
-        const rate = capacity / (capacity / harvestRate + 2 * distance);
+        // Стоимость доставки — это не «две клетки», а усталость, которую
+        // крип наберёт по дороге с грузом: за шаг движок даёт
+        // `(WORK-части + груз) × 2` единиц усталости, и отдых потом
+        // растягивает путь в разы. Раньше расстояние учитывалось с
+        // коэффициентом 2, и хранилище в четырёх клетках обходилось
+        // дороже хран��лища в одной всего на 3% — харвестер уходил с
+        // источника за полкомнаты, теряя на дороге больше, чем добывал.
+        const walkCost = distance * (1 + load) * DELIVERY_FATIGUE_FACTOR;
+        const rate = capacity / (capacity / harvestRate + walkCost);
 
         if (rate > bestRate || (rate === bestRate && distance < bestDistance)) {
             best = candidate;

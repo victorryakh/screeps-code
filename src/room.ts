@@ -615,17 +615,33 @@ function ensureDeliveryStructures(room: Room): void {
             continue;
         }
 
-        if (type === STRUCTURE_STORAGE) {
-            // Хранилище — дорогая покупка (3000 энергий). Заказываем его
-            // только когда комната может его оплатить, не съев запас
-            // рабочих.
-            if (built + sites > 0) {
-                continue;
+        const cost =
+            type === STRUCTURE_CONTAINER ? CONTAINER_BUILD_COST : STORAGE_BUILD_COST;
+
+        if (built + sites > 0) {
+            // Уже есть такая «дырка» — вторая не нужна. Но если комната
+            // не может её оплатить, площадка только занимает клетку и
+            // место в лимите RCL: снимаем её.
+            const hopeless = room.energyAvailable < cost + BUILDER_RESERVE_ENERGY;
+
+            if (hopeless) {
+                for (const site of room.find(FIND_MY_CONSTRUCTION_SITES, {
+                    filter: (c) => c.structureType === type
+                })) {
+                    (site as ConstructionSite & { remove?: () => number }).remove?.();
+                }
             }
 
-            if (room.energyAvailable < STORAGE_BUILD_COST + BUILDER_RESERVE_ENERGY) {
-                continue;
-            }
+            continue;
+        }
+
+        // Покупка должна окупаться. Контейнер в E34S53 стоит 5000 энергий,
+        // а комната зарабатывает несколько в тик и держит запас для
+        // рабочих: такая покупка съела бы запас, и вместо доставки
+        // получился бы замороженный контроллер. Поэтому «дырку» заказываем
+        // только когда комната может оплатить её целиком, не трогая запас.
+        if (room.energyAvailable < cost + BUILDER_RESERVE_ENERGY) {
+            continue;
         }
 
         const spot = findDeliveryStructureSpot(room);
@@ -1106,7 +1122,16 @@ function updateIncomeRate(room: Room): void {
     // Среднее по накопленному окну: скачки регенерации усредняются, и
     // оценка не скачет вместе с ними. Пока окно короче
     // {@link INCOME_WINDOW_TICKS}, это среднее по тому, что уже накоплено.
-    room.memory._incomeRate = (room.memory._harvested ?? 0) / Math.max(1, window);
+    const measured = (room.memory._harvested ?? 0) / Math.max(1, window);
+
+    // Замер не может превышать физический предел комнаты: сколько энергии
+    // способны отдать её клетки добычи. Иначе скачок после регенерации
+    // источника (одним куском в несколько тысяч) раздул бы бюджет, и
+    // комната завела бы больше рабочих, чем может прокормить.
+    const slotCount = collectHarvestSlots(room, source).length;
+    const ceiling = slotCount * HARVEST_RATE_PER_WORK;
+
+    room.memory._incomeRate = Math.min(measured, ceiling);
 
     if (window >= INCOME_WINDOW_TICKS) {
         room.memory._harvested = 0;
