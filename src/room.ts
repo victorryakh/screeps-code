@@ -1113,7 +1113,16 @@ function updateIncomeRate(room: Room): void {
     // Окно накопления начинается с прошлого замера, а не с текущего
     // момента: иначе первое же деление даёт «добычу за один тик» и доход
     // комнаты на секунду взлетает до сотни.
-    const windowStart = room.memory._incomeWindowTick ?? lastTick;
+    // Окно накопления может остаться незаданным после смены кода: старый
+    // замер не оставил его в памяти. Тогда окно надо начать заново, иначе
+    // деление на один-два тика даёт «добычу за тик» и доход улетает в
+    // потолок.
+    if (room.memory._incomeWindowTick === undefined) {
+        room.memory._incomeWindowTick = lastTick;
+        room.memory._harvested = 0;
+    }
+
+    const windowStart = room.memory._incomeWindowTick;
 
     room.memory._harvested = (room.memory._harvested ?? 0) + harvested;
 
