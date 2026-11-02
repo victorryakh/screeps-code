@@ -609,12 +609,6 @@ function ensureDeliveryStructures(room: Room): void {
             continue;
         }
 
-        if (type === STRUCTURE_CONTAINER && built + sites > 0) {
-            // Один контейнер у источника решают задачу доставки; три
-            // контейнера — это уже роскошь, на которую у комнаты нет денег.
-            continue;
-        }
-
         const cost =
             type === STRUCTURE_CONTAINER ? CONTAINER_BUILD_COST : STORAGE_BUILD_COST;
 
