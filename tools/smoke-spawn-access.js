@@ -97,6 +97,7 @@ const { installPathFinder } = require('./mock-pathfinder');
 const notifications = [];
 const createdSites = [];
 const destroyed = [];
+const removedSites = [];
 const movedCreeps = [];
 let tick = 1000;
 let currentRoom = null;
@@ -109,26 +110,37 @@ function pos(x, y) { return { x, y, roomName: 'E34S53' }; }
 
 function makeRoom(opts) {
     opts = opts || {};
-    const extensions = (opts.extensions || []).map(([x, y]) => ({
-        structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, hits: 1000, hitsMax: 1000,
-        store: {
-            energy: 50,
-            getCapacity() { return 50; },
-            getFreeCapacity() { return 0; },
-            getUsedCapacity() { return 50; }
-        },
-        room: null,
-        destroy() {
-            destroyed.push([x, y]);
-            // The engine removes the structure in the same tick.
-            const idx = structures.indexOf(this);
-            if (idx !== -1) structures.splice(idx, 1);
-            return OK;
-        }
-    }));
+    const extensions = (opts.extensions || []).map(([x, y, energy]) => {
+        const stored = energy === undefined ? 50 : energy;
+        return {
+            structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, hits: 1000, hitsMax: 1000,
+            store: {
+                energy: stored,
+                getCapacity() { return 50; },
+                getFreeCapacity() { return 50 - stored; },
+                getUsedCapacity() { return stored; }
+            },
+            room: null,
+            destroy() {
+                destroyed.push([x, y]);
+                // The engine removes the structure in the same tick.
+                const idx = structures.indexOf(this);
+                if (idx !== -1) structures.splice(idx, 1);
+                return OK;
+            }
+        };
+    });
     const sites = (opts.sites || []).map(([x, y]) => ({
         structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, progress: 0, progressTotal: 3000,
-        room: null
+        room: null,
+        // The runtime exposes ConstructionSite.remove(); it queues the
+        // `room/removeConstructionSite` intent.
+        remove() {
+            removedSites.push([x, y]);
+            const idx = sites.indexOf(this);
+            if (idx !== -1) sites.splice(idx, 1);
+            return OK;
+        }
     }));
     const creeps = (opts.creeps || []).map(([x, y], i) => ({
         name: `creep_${i}`, pos: pos(x, y), my: true, hits: 300, hitsMax: 300,
@@ -235,6 +247,15 @@ function check(name, cond, detail) {
 
 const bot = require(require('path').join(__dirname, '..', 'dist', 'main.js'));
 
+// A ring cell is freed either by removing a construction site on it or by
+// demolishing a ring-1 extension. Both are legitimate; what matters is that
+// the cell is released.
+function ringFreed() {
+    const onRing = ([x, y]) => Math.max(Math.abs(x - 19), Math.abs(y - 26)) === 1;
+    return (removedSites.length >= 1 || destroyed.length >= 1) &&
+        removedSites.every(onRing) && destroyed.every(onRing);
+}
+
 function runTicks(sim, n, step) {
     for (let i = 0; i < n; i++) {
         tick += 1;
@@ -272,9 +293,8 @@ function runTicks(sim, n, step) {
         notifications.some((m) => /sealed/i.test(m)),
         JSON.stringify(notifications));
     check('the birth ring is freed immediately — a blocked spawn must not wait',
-        destroyed.length >= 1 && destroyed.every(([x, y]) =>
-            Math.max(Math.abs(x - 19), Math.abs(y - 26)) === 1),
-        JSON.stringify(destroyed));
+        ringFreed(),
+        `removed=${JSON.stringify(removedSites)} destroyed=${JSON.stringify(destroyed)}`);
 }
 
 // --- Scenario 3: sealed spawn is self-healed --------------------------------
@@ -287,14 +307,13 @@ function runTicks(sim, n, step) {
     global.Memory = {};
     runTicks(sim, 40, () => { tick += 3; });
     check('the ring is freed so that the spawn can place creeps again',
-        destroyed.length >= 1 && destroyed.every(([x, y]) =>
-            Math.max(Math.abs(x - 19), Math.abs(y - 26)) === 1),
-        JSON.stringify(destroyed));
+        ringFreed(),
+        `removed=${JSON.stringify(removedSites)} destroyed=${JSON.stringify(destroyed)}`);
 }
 
 // --- Scenario 4: a healthy spawn is left alone ------------------------------
 {
-    destroyed.length = 0; notifications.length = 0;
+    destroyed.length = 0; removedSites.length = 0; notifications.length = 0;
     const sim = makeRoom({
         extensions: [[19, 25], [18, 26], [20, 26]],
         sites: []
@@ -302,8 +321,10 @@ function runTicks(sim, n, step) {
     global.Memory = {};
     runTicks(sim, 40, () => { tick += 3; });
     check('a healthy spawn is not touched',
-        destroyed.length === 0 && notifications.every((m) => !/sealed/i.test(m)),
-        `destroyed=${JSON.stringify(destroyed)} notified=${JSON.stringify(notifications)}`);
+        destroyed.length === 0 && removedSites.length === 0 &&
+        notifications.every((m) => !/sealed/i.test(m)),
+        `destroyed=${JSON.stringify(destroyed)} removed=${JSON.stringify(removedSites)} ` +
+        `notified=${JSON.stringify(notifications)}`);
 }
 
 // --- Scenario 5: a creep standing on a birth tile seals the spawn ----------
@@ -323,30 +344,33 @@ function runTicks(sim, n, step) {
         notifications.some((m) => /sealed/i.test(m)) || movedCreeps.length > 0,
         `notified=${JSON.stringify(notifications)} moved=${JSON.stringify(movedCreeps)}`);
     check('the spawn ring keeps free birth tiles for the engine',
-        destroyed.length >= 1,
-        JSON.stringify(destroyed));
+        ringFreed(),
+        `removed=${JSON.stringify(removedSites)} destroyed=${JSON.stringify(destroyed)}`);
 }
 
 // --- Scenario 6: ring reserve destroys extensions when too few tiles are free
 {
-    destroyed.length = 0; notifications.length = 0;
+    destroyed.length = 0; removedSites.length = 0; notifications.length = 0;
     const sim = makeRoom({
         extensions: [[18, 26], [20, 26], [18, 27], [19, 27]],
         sites: [[20, 25], [20, 27]]
     });
     global.Memory = {};
     runTicks(sim, 60, () => { tick += 3; });
-    check('the ring reserve frees birth tiles by dropping ring-1 extensions',
-        destroyed.length >= 1 &&
+    check('the ring reserve frees birth tiles',
+        ringFreed(),
+        `removed=${JSON.stringify(removedSites)} destroyed=${JSON.stringify(destroyed)}`);
+    check('only ring-1 cells are touched',
+        removedSites.every(([x, y]) => Math.max(Math.abs(x - 19), Math.abs(y - 26)) === 1) &&
         destroyed.every(([x, y]) => Math.max(Math.abs(x - 19), Math.abs(y - 26)) === 1),
-        JSON.stringify(destroyed));
+        `removed=${JSON.stringify(removedSites)} destroyed=${JSON.stringify(destroyed)}`);
 }
 
 // --- Scenario 7: creeps that fill every free birth tile are pushed away ----
 // The structural ring is fine (3 free tiles), but our own creeps stand on all
 // of them. The engine cannot place a creep, so the bot must move them.
 {
-    destroyed.length = 0; notifications.length = 0; movedCreeps.length = 0;
+    destroyed.length = 0; removedSites.length = 0; notifications.length = 0; movedCreeps.length = 0;
     const sim = makeRoom({
         extensions: [[18, 26], [18, 27], [19, 27], [20, 27]],
         sites: [],
@@ -362,6 +386,43 @@ function runTicks(sim, n, step) {
         JSON.stringify(movedCreeps));
     check('a comfortable ring is not demolished because of standing creeps',
         destroyed.length === 0,
+        JSON.stringify(destroyed));
+}
+
+// --- Scenario 8: a construction site on the ring is removed ----------------
+// A site occupies the tile now and would occupy it forever once built, so a
+// site on the birth ring is a cell lost for good. The runtime exposes
+// ConstructionSite.remove(); the bot must use it instead of demolishing
+// useful extensions.
+{
+    destroyed.length = 0; removedSites.length = 0; notifications.length = 0;
+    const sim = makeRoom({
+        extensions: [[18, 26], [18, 27], [20, 25]],
+        sites: [[20, 27], [21, 28]]
+    });
+    global.Memory = {};
+    runTicks(sim, 40, () => { tick += 3; });
+    check('a construction site on the birth ring is removed',
+        removedSites.some(([x, y]) => x === 20 && y === 27),
+        JSON.stringify(removedSites));
+    check('the site is removed before any extension is demolished',
+        destroyed.length === 0,
+        JSON.stringify(destroyed));
+}
+
+// --- Scenario 9: an empty ring extension is dropped before a loaded one ----
+// Demolishing an extension costs the room its 50 units of capacity, so the
+// empty one goes first.
+{
+    destroyed.length = 0; removedSites.length = 0; notifications.length = 0;
+    const sim = makeRoom({
+        extensions: [[18, 26, 0], [18, 27, 50], [19, 27, 50], [20, 27, 50]],
+        sites: []
+    });
+    global.Memory = {};
+    runTicks(sim, 40, () => { tick += 3; });
+    check('the empty ring extension is dropped first',
+        destroyed.length >= 1 && destroyed[0][0] === 18 && destroyed[0][1] === 26,
         JSON.stringify(destroyed));
 }
 

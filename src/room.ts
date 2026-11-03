@@ -13,6 +13,7 @@ import {
     EXTENSION_CHECK_INTERVAL,
     SPAWN_CLEAR_RADIUS,
     SPAWN_BIRTH_TILES_CRITICAL,
+    SPAWN_BIRTH_TILES_TARGET,
     SEALED_SPAWN_HEAL_DELAY,
     SEALED_SPAWN_HEAL_RETRY,
     HARVEST_RATE_PER_WORK,
@@ -37,7 +38,6 @@ import {
     collectHarvestSlots,
     collectHarvestSlotKeys,
     collectDeliveryTileKeys,
-    hasDeliverySite,
     hasDeliverySink,
     deliveryStructureCapacity,
     findDeliveryStructureSpot,
@@ -742,6 +742,109 @@ function runTowers(room: Room, defense: { attackHostiles: boolean; healInjured: 
 }
 
 /**
+ * Снимает construction site с клетки кольца рождения.
+ *
+ * @remarks
+ * Стройплощадка расширения занимает клетку рождения так же, как готовое
+ * расширение, но освободить её иначе нельзя: достроенное расширение заняло
+ * бы ту же клетку. То есть площадка на кольце — клетка, потерянная
+ * навсегда. Снимать её можно: у движка есть метод `ConstructionSite.remove()`
+ * (он кладёт интент `room/removeConstructionSite`), даже though
+ * `room.removeConstructionSite()` в публичном API отсутствует.
+ *
+ * @param ring Снимок состояния кольца.
+ * @returns `true`, если площадка снята.
+ */
+function freeBirthTileByRemovingSite(ring: SpawnRingInfo): boolean {
+    for (const site of ring.birthSites) {
+        const remove = (site as ConstructionSite & { remove?: () => number }).remove;
+
+        if (typeof remove !== 'function') {
+            continue;
+        }
+
+        if (remove.call(site) === OK) {
+            log.warn(
+                'room',
+                `removed construction site at ${site.pos.x},${site.pos.y} — a site on ` +
+                'the birth ring holds that tile forever'
+            );
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Сносит расширение на кольце рождения, в котором пусто.
+ *
+ * @remarks
+ * Пустое расширение держит клетку рождения вхолостую: энергии в нём нет,
+ * а клетку блокирует. Хранить в нём нечего, а вот клетка рождения дороже
+ * любых 50 единиц ёмкости.
+ *
+ * @param ring Снимок состояния кольца.
+ * @returns `true`, если расширение снесено.
+ */
+function freeBirthTileByDestroyingEmptyExtension(ring: SpawnRingInfo): boolean {
+    const empty = ring.adjacentExtensions
+        .filter((e) => e.store.energy === 0)
+        .sort((a, b) => (a.pos.x - b.pos.x) || (a.pos.y - b.pos.y));
+
+    const target = empty[0];
+
+    if (!target || typeof target.destroy !== 'function') {
+        return false;
+    }
+
+    if (target.destroy() === OK) {
+        log.warn(
+            'room',
+            `destroyed empty extension at ${target.pos.x},${target.pos.y} — it held a ` +
+            'birth tile and stored nothing'
+        );
+
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * Сносит расширение на кольце рождения с наименьшим запасом энергии.
+ *
+ * @remarks
+ * Последний довод: клетку держит расширение, и освободить её иначе нечем.
+ * Сносить выгоднее то, в котором меньше всего энергии.
+ *
+ * @param ring Снимок состояния кольца.
+ * @returns `true`, если расширение снесено.
+ */
+function freeBirthTileByDestroyingExtension(ring: SpawnRingInfo): boolean {
+    const target = ring.adjacentExtensions
+        .slice()
+        .sort((a, b) => a.store.energy - b.store.energy)[0];
+
+    if (!target || typeof target.destroy !== 'function') {
+        return false;
+    }
+
+    if (target.destroy() === OK) {
+        log.warn(
+            'room',
+            `destroyed extension at ${target.pos.x},${target.pos.y}: only ` +
+            `${ring.freeTilesWithoutCreeps} birth tile(s) left around the spawn`
+        );
+
+        return true;
+    }
+
+    return false;
+}
+
+/**
  * Держит вокруг спавна запас свободных клеток, в которые движок может
  * поставить нового крипа.
  *
@@ -758,16 +861,17 @@ function runTowers(room: Room, defense: { attackHostiles: boolean; healInjured: 
  * крипа на клетку с другим крипом, поэтому занятая клетка свободной не
  * является.
  *
- * Порядок действий:
- * - если свободных клеток хватает — ничего не делаем;
- * - если свободных клеток мало, но структурно их достаточно — мешают
- *   наши крипы: сдвигаем их с кольца (постройки не трогаем);
- * - если свободных клеток нет вовсе — кольцо забито постройками: сносится
- *   одно расширение в кольце радиуса 1 — постройка на расстоянии вытяжки
- *   от спавна того же стоит, а вот запечатанный спавн не лечится сам.
+ * Порядок действий — от дешёвого к дорогому:
+ * - снять construction site с кольца: он занимает клетку и не освободит её
+ *   никогда (даже если будет достроен);
+ * - снести пустое расширение на кольце: энергии в нём нет, а клетку
+ *   рождения оно блокирует;
+ * - сдвинуть наших крипов с кольца (самое дешёвое, но не всегда возможно:
+ *   крипу некуда идти, и тогда кольцо снова забьётся);
+ * - снести расширение с наименьшим запасом — последний довод, когда
+ *   свободных клеток нет вообще.
  *
- * Проверка идёт раз в {@link EXTENSION_CHECK_INTERVAL} тиков, сносится не
- * больше одного расширения за проверку.
+ * Проверка идёт раз в {@link EXTENSION_CHECK_INTERVAL} тиков.
  *
  * @param room Комната, которой мы владеем.
  */
@@ -784,32 +888,41 @@ function ensureSpawnRingReserve(room: Room): void {
     for (const spawn of room.find(FIND_MY_SPAWNS)) {
         const ring = inspectSpawnRing(room, spawn);
 
-        // Кольцо в порядке: свободных клеток (с учётом крипов) хватает.
+        // Сколько свободных клеток бот хочет видеть вокруг спавна.
         //
-        // Порог — две клетки, а не три: две свободные клетки дают рабочий
-        // спавн (новорождённый займёт одну, вторая останется), а одна —
-        // спавн на одном крипе, который запечатает его, стоит лишь на
-        // клетку. Требовать три клетки в тесной комнате бессмысленно: там
-        // рабочие крипы вынуждены стоять рядом со спавном, и бот начал бы
-        // бесконечно сдвигать их с кольца.
-        if (ring.freeTiles.length >= SPAWN_BIRTH_TILES_CRITICAL) {
+        // Планка не может быть выше, чем количество пригодных клеток вообще:
+        // в комнате, где спавн стоит в каменном мешке, пригодных клеток
+        // может быть три, и требовать четыре — значит сносить расширения
+        // бесконечно.
+        const target = Math.min(SPAWN_BIRTH_TILES_TARGET, ring.birthTiles.length);
+
+        // Кольцо с запасом — всё в порядке.
+        //
+        // Порог считается по клеткам, свободным **без учёта крипов**:
+        // клетка под нашим крипом освободится сама, а расширение или
+        // стройплощадка держат её навсегда.
+        if (ring.freeTilesWithoutCreeps >= target) {
             continue;
         }
 
-        // Мешают наши собственные крипы: структурно свободных клеток
-        // достаточно — сдвигаем их с кольца.
+        // Стройплощадка на кольце — клетка, потерянная навсегда.
+        if (freeBirthTileByRemovingSite(ring)) {
+            continue;
+        }
+
+        // Структурно свободные клетки есть — мешают наши собственные крипы:
+        // сдвигаем их с кольца (постройки не трогаем).
         //
         // Раньше проверялось только `freeTilesWithoutCreeps`. В E34S53
-        // структурно свободных клеток было ровно три (столько же, сколько
-        // требует `SPAWN_BIRTH_TILES_MIN`), а два крипа стояли на двух из
-        // них. Бот считал кольцо в порядке, хотя свободной оставалась одна
-        // клетка — ровно столько, чтобы спавн произвёл одного крипа и
+        // структурно свободных клеток было ровно три, а два крипа стояли на
+        // двух из них. Бот считал кольцо в порядке, хотя свободной оставалась
+        // одна клетка — ровно столько, чтобы спавн произвёл одного крипа и
         // запечатался навсегда: второму крипу места уже не было бы.
         if (ring.freeTilesWithoutCreeps >= SPAWN_BIRTH_TILES_CRITICAL) {
             // Сдвигаем ровно столько крипов, сколько не хватает до нормы:
             // каждый сдвинутый крип на время теряет свою работу, а лишних
             // движений делать не нужно.
-            const needed = SPAWN_BIRTH_TILES_CRITICAL - ring.freeTiles.length;
+            const needed = Math.max(1, target - ring.freeTiles.length);
             const moved = moveCreepsOffBirthTiles(room, spawn, ring, needed);
 
             if (moved > 0) {
@@ -818,28 +931,21 @@ function ensureSpawnRingReserve(room: Room): void {
                     `moved ${moved} creep(s) off the birth ring of spawn ${spawn.name} ` +
                     `in ${room.name}: only ${ring.freeTiles.length} free birth tile(s) left`
                 );
+
+                continue;
             }
+        }
 
+        // Пустое расширение на кольце держит клетку вхолостую: энергии в
+        // нём нет, а клетку рождения оно блокирует.
+        if (freeBirthTileByDestroyingEmptyExtension(ring)) {
             continue;
         }
 
-        // Структурно свободных клеток нет — кольцо забито постройками.
-        // Сносим одно расширение: постройка на расстоянии вытяжки от
-        // спавна того же стоит, а вот запечатанный спавн не лечится сам.
-        const target = ring.adjacentExtensions[0];
-
-        if (!target || typeof target.destroy !== 'function') {
-            continue;
-        }
-
-        if (target.destroy() === OK) {
-            log.warn(
-                'room',
-                `destroyed extension at ${target.pos.x},${target.pos.y}: only ` +
-                `${ring.freeTilesWithoutCreeps} birth tile(s) left around spawn ` +
-                `${spawn.name} in ${room.name}`
-            );
-        }
+        // Последний довод: сносим расширение с наименьшим запасом —
+        // постройка на расстоянии вытяжки от спавна того же стоит, а вот
+        // запечатанный спавн не лечится сам.
+        freeBirthTileByDestroyingExtension(ring);
     }
 }
 
@@ -1303,28 +1409,29 @@ function ensureSpawnAccessible(room: Room): void {
             continue;
         }
 
-        // Кольцо забито постройками: сносим расширения, освобождая клетки.
-        if (ring.adjacentExtensions.length > 0) {
-            let destroyed = 0;
-
-            for (const ext of ring.adjacentExtensions) {
-                if (typeof ext.destroy !== 'function') {
-                    continue;
-                }
-
-                if (ext.destroy() === OK) {
-                    destroyed++;
-                }
-            }
-
+        // Кольцо забито постройками. Сначала снимаем стройплощадки: они
+        // держат клетку и не освободят её никогда (достроенное расширение
+        // занимало бы ту же клетку). Потом сносим одно расширение — по
+        // одному, а не все сразу: ёмкость комнаты нужна ей самой.
+        if (freeBirthTileByRemovingSite(ring)) {
             room.memory._sealedSpawnTick = Game.time;
             room.memory._sealedSpawnHealTick = Game.time;
 
-            log.warn(
-                'room',
-                `destroyed ${destroyed} extension(s) around spawn ${spawn.name} in ` +
-                `${room.name} to unseal it`
-            );
+            continue;
+        }
+
+        if (freeBirthTileByDestroyingEmptyExtension(ring)) {
+            room.memory._sealedSpawnTick = Game.time;
+            room.memory._sealedSpawnHealTick = Game.time;
+
+            continue;
+        }
+
+        if (ring.adjacentExtensions.length > 0) {
+            freeBirthTileByDestroyingExtension(ring);
+
+            room.memory._sealedSpawnTick = Game.time;
+            room.memory._sealedSpawnHealTick = Game.time;
 
             continue;
         }

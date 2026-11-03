@@ -363,7 +363,7 @@ export function transferEnergy(
 export function findEnergyTransferTarget(
     creep: Creep,
     types: StructureConstant[] = [STRUCTURE_SPAWN, STRUCTURE_EXTENSION]
-): Structure | null {
+): AnyStoreStructure | null {
     const room = creep.room;
 
     const candidates = room.find(FIND_STRUCTURES, {
@@ -390,7 +390,14 @@ export function findEnergyTransferTarget(
         }
     }
 
-    const load = Math.max(1, creep.store[RESOURCE_ENERGY]);
+    // Груз рейса считает {@link deliveryTripLoad}: это минимум из ёмкости
+    // рюкзака и свободного места в хранилище — повезти больше, чем
+    // хранилище примет, харвестер всё равно не сможет.
+    //
+    // Раньше здесь стоял текущий запас крипа (`load`), и из-за этого формула
+    // скорости считалась неверно для двух случаев: пустой рюкзак (груз = 1)
+    // и недозаполненный рюкзак.
+
     let work = 0;
 
     for (const part of creep.body) {
@@ -429,7 +436,7 @@ export function findEnergyTransferTarget(
     let unreachableBy = Number.POSITIVE_INFINITY;
 
     for (const candidate of pool) {
-        const capacity = Math.min(candidate.store.getFreeCapacity(RESOURCE_ENERGY), load);
+        const tripLoad = deliveryTripLoad(creep, candidate);
         const distance = deliveryPathDistance(creep, candidate);
 
         if (distance < 0) {
@@ -453,8 +460,12 @@ export function findEnergyTransferTarget(
         // коэффициентом 2, и хранилище в четырёх клетках обходилось
         // дороже хран��лища в одной всего на 3% — харвестер уходил с
         // источника за полкомнаты, теряя на дороге больше, чем добывал.
-        const walkCost = distance * (1 + load) * DELIVERY_FATIGUE_FACTOR;
-        const rate = capacity / (capacity / harvestRate + walkCost);
+        //
+        // Дорога считается по **грузу рейса**, а не по полному рюкзаку:
+        // харвестер, который повезёт 50 энергии в расширение на 50 мест,
+        // платит за дорогу как за 50, а не за 100.
+        const walkCost = distance * (1 + tripLoad) * DELIVERY_FATIGUE_FACTOR;
+        const rate = tripLoad / (tripLoad / harvestRate + walkCost);
 
         if (rate > bestRate || (rate === bestRate && distance < bestDistance)) {
             best = candidate;
@@ -474,6 +485,43 @@ export function findEnergyTransferTarget(
     }
 
     return best;
+}
+
+/**
+ * Сколько энергии харвестер повезёт за один рейс в указанное хранилище.
+ *
+ * @remarks
+ * Это минимум из свободного места в хранилище и ёмкости рюкзака.
+ *
+ * Раньше харвестер набирал рюкзак до упора (100 энергии), а отдавал
+ * порциями по 50 — ровно столько, сколько вмещало ближайшее расширение.
+ * Вторую половину рюкзака он нёс обратно к источнику: за дорогу платила
+ * усталость, а энергия лежала мёртвым грузом. Цикл получался в полтора
+ * раза длиннее нужного: на 50 доставленной энергии уходило 25 тиков
+ * добычи, 9 тиков дороги с полным рюкзаком и ещё 5 тиков обратной дороги
+ * с полупустым.
+ *
+ * Теперь харвестер возит ровно столько, сколько хранилище примет, и
+ * возвращается с пустым рюкзаком. Тот же цикл занимает 25 + 5 + 4 тика —
+ * на треть быстрее — и, что важнее, работает одинаково с любым хранилищем:
+ * появится контейнер на 1000 мест — харвестер сам повезёт в него все 100.
+ *
+ * @param creep  Крип-доставщик.
+ * @param target Хранилище.
+ * @returns Груз рейса в энергии (не меньше 1).
+ */
+export function deliveryTripLoad(
+    creep: Creep,
+    target: {
+        store: { getFreeCapacity: (resource: ResourceConstant) => number | null };
+    }
+): number {
+    const backpack =
+        creep.store[RESOURCE_ENERGY] + creep.store.getFreeCapacity(RESOURCE_ENERGY);
+
+    const free = target.store.getFreeCapacity(RESOURCE_ENERGY) ?? 0;
+
+    return Math.max(1, Math.min(free, Math.max(1, backpack)));
 }
 
 /**
@@ -833,6 +881,18 @@ export interface SpawnRingInfo {
     creepsOnBirthTiles: Creep[];
     /** Расширения в кольце радиуса 1 вокруг спавна. */
     adjacentExtensions: StructureExtension[];
+    /**
+     * Construction sites в кольце радиуса 1 вокруг спавна.
+     *
+     * @remarks
+     * Стройплощадка расширения занимает клетку рождения ровно так же, как
+     * готовое расширение (`OBSTACLE_OBJECT_TYPES` движка включает и то, и
+     * другое). Отличие одно: площадку нельзя достроить в «нормальное»
+     * расширение — достроенное расширение займёт ту же клетку. То есть
+     * площадка на кольце — это клетка, потерянная навсегда: её нельзя ни
+     * освободить, ни использовать с пользой.
+     */
+    birthSites: ConstructionSite[];
 }
 
 /**
@@ -914,12 +974,34 @@ export function inspectSpawnRing(room: Room, spawn: StructureSpawn): SpawnRingIn
         adjacentExtensions.push(s);
     }
 
+    // Стройплощадки на кольце рождения: они занимают клетку так же, как
+    // расширения, и освободить их можно только снятием площадки.
+    const birthSites: ConstructionSite[] = [];
+
+    for (const c of room.find(FIND_MY_CONSTRUCTION_SITES)) {
+        if (BIRTH_BLOCKING_TYPES.indexOf(c.structureType) === -1) {
+            continue;
+        }
+
+        if (
+            Math.max(
+                Math.abs(c.pos.x - spawn.pos.x),
+                Math.abs(c.pos.y - spawn.pos.y)
+            ) !== 1
+        ) {
+            continue;
+        }
+
+        birthSites.push(c);
+    }
+
     return {
         birthTiles: birthTileList,
         freeTiles,
         freeTilesWithoutCreeps,
         creepsOnBirthTiles,
-        adjacentExtensions
+        adjacentExtensions,
+        birthSites
     };
 }
 

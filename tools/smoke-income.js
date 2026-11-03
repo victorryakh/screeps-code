@@ -173,7 +173,10 @@ function near(a, b) {
 }
 
 const BODIES = {
-    harvester: ['work', 'carry', 'move'],
+    // The real harvester body (see `bodyFor`): a 100-energy backpack and two
+    // MOVE parts. The mock must match it, otherwise the delivery rules are
+    // exercised on a body the bot never spawns.
+    harvester: ['work', 'carry', 'carry', 'move', 'move'],
     upgrader: ['work', 'work', 'carry', 'move'],
     builder: ['work', 'carry', 'carry', 'move', 'move'],
     repairer: ['work', 'carry', 'move', 'move']
@@ -193,7 +196,7 @@ function makeCreep(x, y, role, energy) {
     const store = {
         energy: energy || 0,
         getCapacity() { return capacity; },
-        getFreeCapacity() { return capacity - this.energy; }
+        getFreeCapacity() { return Math.max(0, capacity - this.energy); }
     };
 
     return {
@@ -734,6 +737,28 @@ function actions(creep, kind) {
 
     check('the harvester looks for a target that takes the whole load',
         transfers.length > 0 && transfers[0][1] === 19 && transfers[0][2] === 26,
+        JSON.stringify(harvester.actions));
+}
+
+// --- Scenario 9d: the harvester does not overfill its backpack -------------
+// The extension next to the harvest tile holds 50 energy, the harvester's
+// backpack holds 100. The old rule was "fill the backpack, then deliver":
+// the harvester carried 100 to hand over 50 and dragged the other 50 back
+// to the source, paying fatigue for it on the way. The rule now: carry
+// exactly what the target accepts, and come back with an empty backpack.
+{
+    const sim = makeRoom({
+        extensions: [[21, 24, 0]],
+        creeps: [[20, 24, 'harvester', 50]]
+    });
+
+    runTicks(sim, 1);
+
+    const harvester = sim.creeps[0];
+    const transfers = actions(harvester, 'transfer');
+
+    check('the harvester delivers as soon as the target can take the load',
+        transfers.length > 0 && transfers[0][1] === 21 && transfers[0][2] === 24,
         JSON.stringify(harvester.actions));
 }
 
