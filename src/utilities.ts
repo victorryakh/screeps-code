@@ -19,8 +19,17 @@ import { EXPANSION } from './strategy';
 type MoveDest = RoomPosition | { pos: RoomPosition };
 
 /**
- * Перемещает крипа к указанной точке, используя закэшированный в памяти крипа путь
- * для экономии CPU. При повторных вызовах с тем же назначением и в пределах TTL
+ * Перемещает крипа к указанной точке, используя закэчированный в памяти крипа путь
+ * для экономии CPU.
+ *
+ * @remarks
+ * Крипы — препятствия для движения: это модель движка. `Creep.moveTo`
+ * идёт через `Room.findPath`, где опция `ignore` ждёт ОБЪЕКТЫ (крипы,
+ * структуры), а константы FIND (в том числе `FIND_CREEPS`) молча
+ * игнорируются. Исключать крипов из пути бессмысленно: движок всё равно
+ * не поставит крипа на занятую клетку и отклонит движение — крип упрётся
+ * в соседа и простоит. Обойти занятую клетку можно только построив путь
+ * с крипами как с препятствиями, а это и делает движок по умолчанию. При повторных вызовах с тем же назначением и в пределах TTL
  * применяется сохранённый маршрут через `Creep.moveByPath`; при его устаревании,
  * отсутствии или ошибке повторно выполняется полный поиск пути через `Creep.moveTo`.
  *
@@ -213,23 +222,32 @@ export function harvestEnergy(
 
     if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
         const tiles = findHarvestTiles(creep, source);
-        const moveOpts = withCreepsIgnored(opts);
 
         for (const tile of tiles) {
-            const result = moveCached(creep, tile, moveOpts);
+            const result = moveCached(creep, tile, opts);
 
             if (result === OK || result === ERR_TIRED) {
                 // Запоминаем клетку: распределение клеток добычи должно быть
                 // устойчивым, иначе харвестеры каждый тик меняются местами
                 // и в итоге не копает никто (см. `findHarvestTiles`).
-                creep.memory._harvestTile = { x: tile.x, y: tile.y };
+                //
+                // Но закрепляем клетку только если она действительно наша.
+                // Раньше клетку закрепляли и тогда, когда на ней уже стоял
+                // другой харвестер: путь к ней существует (движок крипов в
+                // пути игнорирует), значит `moveTo` отвечал `OK`, и второй
+                // харвестер закреплял чужую клетку и ждал её вечно. В
+                // E34S53 так работали два харвестера на клетке (20,24), а
+                // третий стоял в кармане у спавна с пустым рюкзаком.
+                if (!isHarvestTileTakenByOther(creep, tile)) {
+                    creep.memory._harvestTile = { x: tile.x, y: tile.y };
+                }
 
                 return result;
             }
         }
 
         // Ни одна соседняя клетка не подошла — пробуем цель напрямую.
-        return moveCached(creep, source, moveOpts);
+        return moveCached(creep, source, opts);
     }
 
     // Клетка, на которой крип реально копает, и есть его клетка добычи.
@@ -240,27 +258,6 @@ export function harvestEnergy(
     creep.memory._harvestTile = { x: creep.pos.x, y: creep.pos.y };
 
     return OK;
-}
-
-/**
- * Дополняет опции перемещения правилом «крипов не считать препятствием».
- *
- * @remarks
- * По умолчанию поиск пути считает других крипов препятствиями, и в тесной
- * комнате (узкий проход к источнику, кольцо вокруг спавна) путь не
- * находится вовсе: крип стоит и не работает. Для экономики это хуже, чем
- * риск пройти рядом с другим крипом.
- *
- * @param opts Исходные опции.
- */
-function withCreepsIgnored(opts?: MoveToOpts): MoveToOpts {
-    const merged: MoveToOpts = { ...(opts ?? {}) };
-
-    if (!merged.ignore) {
-        merged.ignore = [FIND_CREEPS];
-    }
-
-    return merged;
 }
 
 /**
@@ -306,10 +303,8 @@ export function transferEnergy(
     }
 
     if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-        const moveOpts = withCreepsIgnored(opts);
-
         // Подойти вплотную: сдача энергии работает с расстояния 1.
-        moveOpts.range = 1;
+        const moveOpts: MoveToOpts = { ...(opts ?? {}), range: 1 };
 
         return moveCached(creep, target, moveOpts);
     }
@@ -328,9 +323,12 @@ export function transferEnergy(
  *          структур со свободным местом.
  *
  * @remarks
- * Крипов в поиске пути игнорируем — по той же причине, что и при перемещении
- * (см. {@link withCreepsIgnored}): в тесной комнате один стоящий крип
- * перекрывает единственный проход, и цель перестаёт находиться вообще.
+ * Замер расстояния до хранилища (см. `deliveryPathDistance`) идёт по API
+ * `PathFinder.search`, который крипов в пути игнорирует: расстояние —
+ * это свойство комнаты, а не текущего расклада крипов. Движение при этом
+ * строится движком по другим правилам (крипы — препятствия), поэтому
+ * бот старается выбирать цель, до которой можно дойти, и не мерить
+ * расстояние чаще, чем нужно (см. `DELIVERY_TARGET_TTL`).
  *
  * Выбирается не «самое вместительное», а самое **быстрое**: хранилище, в
  * которое крип успеет принести больше энергии в тик. Для хранилища с
@@ -541,6 +539,27 @@ export function deliveryTripLoad(
  * @returns Длина пути в клетках.
  */
 function deliveryPathDistance(creep: Creep, target: { pos: RoomPosition }): number {
+    // Крип уже в зоне передачи — доставка без шага.
+    //
+    // Движок в этом случае возвращает ПУСТОЙ путь: цель достигнута, идти
+    // некуда. Раньше пустой путь считался «недостижимо» (-1), и хранилище
+    // в шаге от крипа оказывалось худшим выбором из возможных: формула
+    // скорости считала его недостижимым и уводила харвестера в другой
+    // конец комнаты.
+    //
+    // В E34S53 харвестер стоял на клетке добычи, расширение было в шаге,
+    // и харвестер вместо сдачи энергии шёл через полкомнаты — по болоту,
+    // с полным рюкзаком.
+    //
+    // Расстояние считаем сами (шквал Хеви): у оффлайн-мока позиции нет
+    // метода `isNearTo`.
+    const dx = Math.abs(creep.pos.x - target.pos.x);
+    const dy = Math.abs(creep.pos.y - target.pos.y);
+
+    if (Math.max(dx, dy) <= 1) {
+        return 0;
+    }
+
     try {
         const path = PathFinder.search(creep.pos, {
             pos: target.pos,
@@ -1273,6 +1292,42 @@ export function findHarvestTiles(
 }
 
 /**
+ * Занята ли клетка добычи другим харвестером.
+ *
+ * @remarks
+ * Клетка считается занятой, если на ней стоит другой крип **или** если
+ * другой крип закреплён за ней (даже если он ещё идёт к ней). Именно
+ * закрепление и создавало гонку: путь до занятой клетки существует (движок
+ * крипов в пути игнорирует), поэтому второй харвестер считал, что клетка
+ * свободна, закреплял её и ждал — а первый на ней уже работал.
+ *
+ * @param creep Крип, который ищет клетку.
+ * @param tile  Клетка добычи.
+ * @returns `true`, если клетка занята другим крипом.
+ */
+function isHarvestTileTakenByOther(creep: Creep, tile: RoomPosition): boolean {
+    const room = creep.room;
+
+    for (const other of room.find(FIND_CREEPS)) {
+        if (other.name === creep.name) {
+            continue;
+        }
+
+        if (other.pos.x === tile.x && other.pos.y === tile.y) {
+            return true;
+        }
+
+        const claimed = other.memory._harvestTile;
+
+        if (claimed && claimed.x === tile.x && claimed.y === tile.y) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
  * Ищет ближайшую структуру, из которой можно забрать энергию: спавн или
  * расширение с ненулевым запасом.
  *
@@ -1404,7 +1459,7 @@ export function withdrawEnergy(
     const result = creep.withdraw(donor, RESOURCE_ENERGY, amount);
 
     if (result === ERR_NOT_IN_RANGE) {
-        return moveCached(creep, donor, withCreepsIgnored(opts));
+        return moveCached(creep, donor, opts);
     }
 
     return result;
@@ -1491,6 +1546,258 @@ export function collectDeliveryTileKeys(room: Room): Set<string> {
     }
 
     return keys;
+}
+
+/**
+ * Клетки кольца рождения вокруг спавна — восемь соседей.
+ *
+ * @param spawn Спавн.
+ * @returns Множество ключей `"x,y"`.
+ */
+function ringTileKeys(spawn: StructureSpawn): Set<string> {
+    const keys = new Set<string>();
+
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            if (dx === 0 && dy === 0) {
+                continue;
+            }
+
+            keys.add(`${spawn.pos.x + dx},${spawn.pos.y + dy}`);
+        }
+    }
+
+    return keys;
+}
+
+/**
+ * Регион кольца рождения: клетки, до которых можно дойти с кольца.
+ *
+ * @remarks
+ * Клетки добычи считаются занятыми: на них стоят харвестеры, и через них
+ * нельзя пройти. Поэтому регион — это именно та часть комнаты, в которую
+ * попадает новый крип сразу после рождения.
+ *
+ * @param room  Комната.
+ * @param spawn Спавн.
+ * @param open  Дополнительная клетка, которую считаем свободной (проверка
+ *              «а если убрать вот эту постройку?»).
+ * @returns Множество ключей `"x,y"`.
+ */
+function collectBirthRegion(
+    room: Room,
+    spawn: StructureSpawn,
+    open?: string
+): Set<string> {
+    const terrain = room.getTerrain();
+    const blocked = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        if (BIRTH_BLOCKING_TYPES.indexOf(s.structureType) !== -1) {
+            blocked.add(`${s.pos.x},${s.pos.y}`);
+        }
+    }
+
+    for (const c of room.find(FIND_CONSTRUCTION_SITES)) {
+        blocked.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    // Клетки добычи заняты крипами: через них не пройти.
+    for (const key of collectHarvestSlotKeys(room)) {
+        blocked.add(key);
+    }
+
+    if (open !== undefined) {
+        blocked.delete(open);
+    }
+
+    const region = new Set<string>();
+    const queue: { x: number; y: number }[] = [];
+
+    const push = (x: number, y: number): void => {
+        if (x < 1 || x > 48 || y < 1 || y > 48) {
+            return;
+        }
+
+        const key = `${x},${y}`;
+
+        if (region.has(key) || blocked.has(key)) {
+            return;
+        }
+
+        if (terrain.get(x, y) === WALL_TERRAIN) {
+            return;
+        }
+
+        region.add(key);
+        queue.push({ x, y });
+    };
+
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            if (dx === 0 && dy === 0) {
+                continue;
+            }
+
+            push(spawn.pos.x + dx, spawn.pos.y + dy);
+        }
+    }
+
+    while (queue.length > 0) {
+        const cur = queue.pop() as { x: number; y: number };
+
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                if (dx === 0 && dy === 0) {
+                    continue;
+                }
+
+                push(cur.x + dx, cur.y + dy);
+            }
+        }
+    }
+
+    return region;
+}
+
+/**
+ * Есть ли у кольца рождения выход в комнату.
+ *
+ * @remarks
+ * Кольцо — это восемь клеток вокруг спавна, и движок ставит на них
+ * нового крипа. Если все они заперты в «кармане», спавн — ловушка: крип
+ * рождается внутри и не может выйти ни к источнику, ни в комнату.
+ *
+ * В E34S53 «карман» спавна закрыли расширения бота, и единственным
+ * выходом была клетка добычи (20,24). На ней стоит харвестер, и весь
+ * поток крипов вставал: новые харвестеры рождались в кармане и не могли
+ * дойти до источника, а работающий харвестер держал единственный выход
+ * занятым. Кольцо при этом выглядело свободным — занятые клетки считались
+ * «нашими крипами», а не «запертой комнатой».
+ *
+ * @param room  Комната.
+ * @param spawn Спавн.
+ * @returns `true`, если с кольца есть выход в комнату.
+ */
+export function hasBirthExit(room: Room, spawn: StructureSpawn): boolean {
+    const ring = ringTileKeys(spawn);
+    const region = collectBirthRegion(room, spawn);
+
+    for (const key of region) {
+        if (!ring.has(key)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Открывает выход из кольца рождения.
+ *
+ * @remarks
+ * Снимает стройплощадку или сносит расширение на границе «кармана»
+ * спавна — то самое, из-за которого кольцо оказалось заперто. Площадки
+ * идут первыми: вложенная в них энергия не потеряна, а расширение при
+ *ходится строить заново.
+ *
+ * @param room  Комната.
+ * @param spawn Спавн.
+ * @returns `true`, если выход удалось открыть.
+ */
+export function openBirthExit(room: Room, spawn: StructureSpawn): boolean {
+    const region = collectBirthRegion(room, spawn);
+    const ring = ringTileKeys(spawn);
+
+    type Candidate = {
+        key: string;
+        progress: number;
+        remove: () => void;
+    };
+
+    const candidates: Candidate[] = [];
+
+    for (const site of room.find(FIND_MY_CONSTRUCTION_SITES)) {
+        const key = `${site.pos.x},${site.pos.y}`;
+        const s = site as ConstructionSite & { remove?: () => number };
+
+        if (!s.remove) {
+            continue;
+        }
+
+        candidates.push({
+            key,
+            progress: site.progress,
+            remove: () => {
+                s.remove?.();
+            }
+        });
+    }
+
+    for (const s of room.find(FIND_MY_STRUCTURES)) {
+        if (s.structureType !== STRUCTURE_EXTENSION) {
+            continue;
+        }
+
+        const ext = s as StructureExtension & { destroy?: () => number };
+
+        if (!ext.destroy) {
+            continue;
+        }
+
+        candidates.push({
+            key: `${s.pos.x},${s.pos.y}`,
+            progress: ext.store.energy,
+            remove: () => {
+                ext.destroy?.();
+            }
+        });
+    }
+
+    // Кандидаты — только те, кто стоит на границе региона.
+    const onBorder = new Set<string>();
+
+    for (const key of region) {
+        const [sx, sy] = key.split(',').map(Number);
+
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                if (dx === 0 && dy === 0) {
+                    continue;
+                }
+
+                onBorder.add(`${(sx as number) + dx},${(sy as number) + dy}`);
+            }
+        }
+    }
+
+    const relevant = candidates.filter((c) => onBorder.has(c.key));
+
+    // Сначала то, что ничего не стоит: пустые площадки, затем площадки
+    // с вложенной энергией, затем расширения.
+    relevant.sort((a, b) => a.progress - b.progress);
+
+    for (const candidate of relevant) {
+        const grown = collectBirthRegion(room, spawn, candidate.key);
+        let opens = false;
+
+        for (const key of grown) {
+            if (!ring.has(key)) {
+                opens = true;
+                break;
+            }
+        }
+
+        if (!opens) {
+            continue;
+        }
+
+        candidate.remove();
+
+        return true;
+    }
+
+    return false;
 }
 
 /**

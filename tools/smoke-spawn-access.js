@@ -426,6 +426,44 @@ function runTicks(sim, n, step) {
         JSON.stringify(destroyed));
 }
 
+// --- Scenario 10: the birth ring must have a way out ----------------------
+// The ring can be locked inside a pocket: every tile around it is walled in
+// by our own structures, and the only way out is a harvest tile - a tile a
+// harvester stands on. In E34S53 that was the whole traffic jam: a new
+// harvester is born inside the pocket and cannot get out, while the one
+// working harvester keeps the only exit busy.
+{
+    destroyed.length = 0; removedSites.length = 0; notifications.length = 0;
+
+    // Close the shell around the spawn's ring with walls, leaving (21,27)
+    // for a construction site - the same shape E34S53 had.
+    const shell = [
+        '17,24', '18,24', '19,24', '21,24', '17,25', '21,25', '17,26', '21,26',
+        '17,27', '17,28', '18,28', '19,28', '20,28', '21,28'
+    ];
+
+    for (const key of shell) {
+        WALLS.add(key);
+    }
+
+    try {
+        const sim = makeRoom({ extensions: [], sites: [[21, 27]] });
+        global.Memory = {};
+        runTicks(sim, 3);
+
+        check('a closed birth ring is opened by removing the blocking site',
+            removedSites.some(([x, y]) => x === 21 && y === 27),
+            `removed=${JSON.stringify(removedSites)} destroyed=${JSON.stringify(destroyed)}`);
+        check('the closed birth ring is reported to the user',
+            notifications.some((m) => /exit|closed/i.test(m)),
+            JSON.stringify(notifications));
+    } finally {
+        for (const key of shell) {
+            WALLS.delete(key);
+        }
+    }
+}
+
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length ? 1 : 0);

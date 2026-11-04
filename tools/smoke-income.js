@@ -250,7 +250,7 @@ function makeCreep(x, y, role, energy) {
         },
         moveTo(target, opts) {
             const p = target.pos || target;
-            this.actions.push(['moveTo', p.x, p.y, opts && opts.range]);
+            this.actions.push(['moveTo', p.x, p.y, opts && opts.range, opts && opts.ignore]);
             return OK;
         },
         say(msg) { this.actions.push(['say', msg]); },
@@ -973,6 +973,60 @@ function actions(creep, kind) {
     check('the upgrader has two MOVE parts from RCL 2 on',
         body.filter((p) => p === 'move').length === 2,
         JSON.stringify(body));
+}
+
+// --- Scenario 18: the movement does not pretend to ignore creeps ----------
+// `Creep.moveTo` goes through `Room.findPath`, whose `ignore` option expects
+// OBJECTS (creeps, structures) and silently drops FIND constants. Asking to
+// ignore `FIND_CREEPS` there does nothing: the creeps stay obstacles.
+//
+// That is the behaviour the bot needs. Excluding the creeps from the path
+// would not help either - the engine refuses to put a creep on a busy tile
+// anyway, so the movement would be rejected and the creep would stall
+// against its neighbour instead of walking around it.
+{
+    const sim = makeRoom({
+        creeps: [[20, 24, 'harvester', 100]],
+        extensions: [[21, 24, 0]]
+    });
+
+    runTicks(sim, 1);
+
+    const moves = actions(sim.creeps[0], 'moveTo');
+
+    check('the movement relies on the engine model: creeps are obstacles',
+        moves.length > 0 && moves.every((m) => m[4] === undefined),
+        JSON.stringify(moves));
+}
+
+// --- Scenario 19: a harvester does not take over a busy harvest tile -------
+// All three harvest tiles are taken: the claim is made when the creep starts
+// moving, so a creep that is walking towards a tile already claims it. Two
+// harvesters ended up claiming (20,24): one dug there, the other stood in
+// the pocket by the spawn with an empty backpack and waited for a tile that
+// was never going to be free.
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 50],
+            [20, 23, 'harvester', 50],
+            [20, 24, 'harvester', 50],
+            [19, 25, 'harvester', 0]
+        ]
+    });
+
+    for (const c of sim.creeps.slice(0, 3)) {
+        c.memory._harvestTile = { x: c.pos.x, y: c.pos.y };
+    }
+
+    runTicks(sim, 1);
+
+    const taken = sim.creeps.slice(0, 3).map((c) => `${c.memory._harvestTile.x},${c.memory._harvestTile.y}`);
+    const last = sim.creeps[3].memory._harvestTile;
+
+    check('a harvester does not claim a tile another harvester stands on',
+        !last || taken.indexOf(`${last.x},${last.y}`) === -1,
+        JSON.stringify({ taken, last }));
 }
 
 const failed = results.filter((r) => !r.ok);

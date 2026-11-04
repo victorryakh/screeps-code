@@ -139,6 +139,8 @@ declare global {
         _spawnAccessCheckTick?: number;
         /** Тик последней проверки запаса свободных клеток рождения (см. `ensureSpawnRingReserve`). */
         _ringReserveCheckTick?: number;
+        /** Тик последней проверки наличия выхода из кольца рождения (см. `ensureBirthExit`). */
+        _birthExitCheckTick?: number;
         /** Диагностический снимок состояния кольца клеток рождения (пишется, когда кольцо тесное). */
         _ringDebug?: {
             tick: number;

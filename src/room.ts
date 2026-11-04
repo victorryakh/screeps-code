@@ -33,6 +33,8 @@ import {
 import { trySpawn } from './spawn';
 import {
     inspectSpawnRing,
+    hasBirthExit,
+    openBirthExit,
     findFreeTileNear,
     findUpgradeSpot,
     collectHarvestSlots,
@@ -110,6 +112,7 @@ export function run(room: Room): void {
     ensureSpawn(room);
     ensureSpawnAccessible(room);
     ensureSpawnRingReserve(room);
+    ensureBirthExit(room);
     updateSourceSaturation(room, counts);
     updateIncomeRate(room);
 
@@ -1526,6 +1529,60 @@ function moveCreepsOffBirthTiles(
     }
 
     return moved;
+}
+
+/**
+ * Следит за тем, чтобы у кольца рождения был выход в комнату.
+ *
+ * @remarks
+ * Кольцо — восемь клеток вокруг спавна, и движок ставит на них нового
+ * крипа. Если кольцо заперто в «кармане» (все выходы закрыты нашими
+ * постройками), спавн становится ловушкой: крип рождается внутри и не
+ * может выйти ни к источнику, ни в комнату. Колония в этом случае
+ * медленно умирает: умирающих рабочих заменить некем.
+ *
+ * В E34S53 «карман» закрыли расширения бота, и единственным выходом была
+ * клетка добычи (20,24) — на ней стоит харвестер. Пока выход остаётся
+ * закрытым, никто не может сменить работающего харвестера, и через
+ * полтора часа (CREEP_LIFE_TICKS) колония останется без добычи.
+ *
+ * Проверка идёт раз в EXTENSION_CHECK_INTERVAL тиков и стоит один обход
+ * комнаты, но только когда кольцо действительно заперто: в этом случае
+ * регион кольца — это handful клеток, а не вся комната.
+ *
+ * @param room Комната.
+ */
+function ensureBirthExit(room: Room): void {
+    if (
+        room.memory._birthExitCheckTick &&
+        Game.time - room.memory._birthExitCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._birthExitCheckTick = Game.time;
+
+    for (const spawn of room.find(FIND_MY_SPAWNS)) {
+        if (hasBirthExit(room, spawn)) {
+            continue;
+        }
+
+        if (openBirthExit(room, spawn)) {
+            log.warn(
+                'room',
+                `opened an exit from the birth ring of spawn ${spawn.name} in ${room.name}: ` +
+                'the ring was closed and new creeps could not leave it'
+            );
+
+            continue;
+        }
+
+        log.warn(
+            'room',
+            `the birth ring of spawn ${spawn.name} in ${room.name} is closed and nothing ` +
+            'can be removed to open it: new creeps will be trapped inside'
+        );
+    }
 }
 
 /**
