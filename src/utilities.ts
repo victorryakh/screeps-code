@@ -7,7 +7,10 @@ import {
     UPGRADE_RANGE,
     HARVEST_RATE_PER_WORK,
     DELIVERY_TARGET_TTL,
-    DELIVERY_FATIGUE_FACTOR
+    DELIVERY_FATIGUE_FACTOR,
+    CONFINED_REGION_MIN_GROWTH,
+    STEP_ASIDE_RADIUS,
+    STEP_ASIDE_TIMEOUT
 } from './constants';
 import { EXPANSION } from './strategy';
 
@@ -1488,6 +1491,329 @@ export function collectHarvestSlotKeys(room: Room): Set<string> {
 
     return keys;
 }
+
+/**
+ * Выполняет назначенный сдвиг в сторону.
+ *
+ * @remarks
+ * Сдвиг — исключение из правил роли: он важнее обычной работы, но только
+ * потому, что без него другой наш крип простаивает. Поэтому выполняется он
+ * первым делом и только пока не пришёл на место.
+ *
+ * Если пути к клетке нет, сдвиг отменяется: иначе крип будет пробовать
+ * дойти недостижимой клетки и вовсе перестанет работать. Такой крип
+ * помечается флагом `_stepAsideFailed`, и комната больше не назначает ему
+ * сдвиг, пока запертый крип не выберется.
+ *
+ * @param creep Крип.
+ * @returns `true`, если крип сейчас двигается на сдвиг.
+ */
+export function runStepAside(creep: Creep): boolean {
+    const target = creep.memory._stepAside;
+
+    if (!target) {
+        return false;
+    }
+
+    if (creep.pos.x === target.x && creep.pos.y === target.y) {
+        delete creep.memory._stepAside;
+        delete creep.memory._stepAsideTick;
+        return false;
+    }
+
+    // Сдвиг не выполняется слишком долго — клетка занята или путь перекрыт.
+    // Отменяем: лучше вернуться к работе, чем совсем перестать работать.
+    const since = creep.memory._stepAsideTick;
+
+    if (since !== undefined && Game.time - since > STEP_ASIDE_TIMEOUT) {
+        delete creep.memory._stepAside;
+        delete creep.memory._stepAsideTick;
+        creep.memory._stepAsideFailed = true;
+        return false;
+    }
+
+    const result = moveCached(creep, new RoomPosition(target.x, target.y, creep.room.name), {
+        visualizePathStyle: { stroke: '#ff00ff' }
+    });
+
+    if (result === ERR_NO_PATH) {
+        delete creep.memory._stepAside;
+        delete creep.memory._stepAsideTick;
+        creep.memory._stepAsideFailed = true;
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Клетки, до которых может дойти крип, если стены, постройки и остальные
+ * наши крипы — препятствия.
+ *
+ * @remarks
+ * Это та же модель, что и у движка: крип не встанет на клетку, занятую
+ * другим крипом, и не пройдёт сквозь стену рельефа или постройку. Дороги
+ * проходимы — по ним ходят все.
+ *
+ * @param room    Комната.
+ * @param origin  Откуда считаем.
+ * @param blocked Дополнительные занятые клетки.
+ * @returns Множество доступных клеток.
+ */
+export function computeReachableTiles(
+    room: Room,
+    origin: RoomPosition,
+    blocked: Set<string>
+): Set<string> {
+    const terrain = room.getTerrain();
+    const seen = new Set<string>();
+    const start = `${origin.x},${origin.y}`;
+    const queue: RoomPosition[] = [origin];
+
+    // Постройки и стройплощадки тоже занимают клетку: сквозь них не пройти.
+    for (const s of room.find(FIND_STRUCTURES)) {
+        if (s.structureType === STRUCTURE_ROAD) {
+            continue;
+        }
+
+        blocked.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const c of room.find(FIND_CONSTRUCTION_SITES)) {
+        blocked.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    seen.add(start);
+
+    while (queue.length > 0) {
+        const current = queue.shift() as RoomPosition;
+
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                if (dx === 0 && dy === 0) {
+                    continue;
+                }
+
+                const x = current.x + dx;
+                const y = current.y + dy;
+
+                if (x < 1 || x > 48 || y < 1 || y > 48) {
+                    continue;
+                }
+
+                const key = `${x},${y}`;
+
+                if (seen.has(key) || blocked.has(key)) {
+                    continue;
+                }
+
+                if (terrain.get(x, y) === WALL_TERRAIN) {
+                    continue;
+                }
+
+                seen.add(key);
+                queue.push(new RoomPosition(x, y, room.name));
+            }
+        }
+    }
+
+    return seen;
+}
+
+/**
+ * Область, доступная крипу, если остальные наши крипы — препятствия.
+ *
+ * @param room         Комната.
+ * @param creep        Крип, от которого считаем.
+ * @param freeTile     Клетка нашего крипа, которую считаем свободной: именно
+ *                     её занимает «запирающий» рабочий.
+ * @param extraBlocked Дополнительные занятые клетки.
+ * @returns Множество доступных клеток.
+ */
+export function regionForCreep(
+    room: Room,
+    creep: Creep,
+    freeTile?: { x: number; y: number },
+    extraBlocked?: Set<string>
+): Set<string> {
+    const blocked = new Set<string>(extraBlocked ?? []);
+    const free = freeTile ? `${freeTile.x},${freeTile.y}` : null;
+
+    for (const other of room.find(FIND_MY_CREEPS)) {
+        if (other.name === creep.name) {
+            continue;
+        }
+
+        const key = `${other.pos.x},${other.pos.y}`;
+
+        if (free !== null && key === free) {
+            continue;
+        }
+
+        blocked.add(key);
+    }
+
+    return computeReachableTiles(room, creep.pos, blocked);
+}
+
+
+
+
+
+
+/**
+ * Кто из наших крипов запирает комнату.
+ *
+ * @remarks
+ * Крип, стоящий на клетке, которая нужна другому нашему крипу, — пробка.
+ * Определяем это так: если этот крип уйдёт, у кого-то заметно вырастет
+ * доступная область.
+ *
+ * В E34S53 «карман» со спавном занимал шесть клеток, и все шесть были
+ * заняты нашими крипами: харвестером (заперт в тупике), апгрейдером,
+ * вторым харвестером и билдером на выходе из кармана. Из-за этого каждый
+ * новый харвестер рождался в кармане и не мог из него выйти — треть
+ * дохода комнаты просто не добывалась.
+ *
+ * @param room     Комната.
+ * @param creep    Крип, которого проверяем.
+ * @param regions  Доступные области наших крипов сейчас.
+ * @returns `true`, если этот крип запирает кого-то из наших.
+ */
+export function creepBlocksSomebody(
+    room: Room,
+    creep: Creep,
+    regions: Map<string, Set<string>>
+): boolean {
+    for (const other of room.find(FIND_MY_CREEPS)) {
+        if (other.name === creep.name) {
+            continue;
+        }
+
+        const current = regions.get(other.name);
+
+        if (!current) {
+            continue;
+        }
+
+        const freed = regionForCreep(room, other, { x: creep.pos.x, y: creep.pos.y });
+
+        if (freed.size - current.size >= CONFINED_REGION_MIN_GROWTH) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Куда встать крипу, который запирает остальных.
+ *
+ * @remarks
+ * Клетка должна быть рядом, свободна и не должна ухудшать положение
+ * никого: если, встав на неё, крип сам станет чьим-то препятствием, толку
+ * от сдвига нет.
+ *
+ * @param room    Комната.
+ * @param creep   Крип, который запирает остальных.
+ * @param regions Доступные области наших крипов сейчас.
+ * @returns Клетка, куда встать, либо `null`.
+ */
+export function findStepAsideTarget(
+    room: Room,
+    creep: Creep,
+    regions: Map<string, Set<string>>
+): RoomPosition | null {
+    const terrain = room.getTerrain();
+    const harvestSlots = collectHarvestSlotKeys(room);
+    const occupied = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const s of room.find(FIND_CONSTRUCTION_SITES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const other of room.find(FIND_MY_CREEPS)) {
+        if (other.name === creep.name) {
+            continue;
+        }
+
+        occupied.add(`${other.pos.x},${other.pos.y}`);
+    }
+
+    const current = `${creep.pos.x},${creep.pos.y}`;
+    const workerRegion = regionForCreep(room, creep);
+    let best: { pos: RoomPosition; distance: number } | null = null;
+
+    for (let dx = -STEP_ASIDE_RADIUS; dx <= STEP_ASIDE_RADIUS; dx++) {
+        for (let dy = -STEP_ASIDE_RADIUS; dy <= STEP_ASIDE_RADIUS; dy++) {
+            const x = creep.pos.x + dx;
+            const y = creep.pos.y + dy;
+
+            if (x < 1 || x > 48 || y < 1 || y > 48) {
+                continue;
+            }
+
+            const key = `${x},${y}`;
+
+            if (key === current || occupied.has(key) || harvestSlots.has(key)) {
+                continue;
+            }
+
+            if (terrain.get(x, y) === WALL_TERRAIN) {
+                continue;
+            }
+
+            if (!workerRegion.has(key)) {
+                continue;
+            }
+
+            // Переход не должен ухудшать положение никого из наших: крип
+            // освобождает текущую клетку и встаёт на кандидата.
+            let hurts = false;
+
+            for (const other of room.find(FIND_MY_CREEPS)) {
+                if (other.name === creep.name) {
+                    continue;
+                }
+
+                const current2 = regions.get(other.name);
+
+                if (!current2) {
+                    continue;
+                }
+
+                const after = regionForCreep(
+                    room,
+                    other,
+                    { x: creep.pos.x, y: creep.pos.y },
+                    new Set<string>([key])
+                );
+
+                if (after.size < current2.size) {
+                    hurts = true;
+                    break;
+                }
+            }
+
+            if (hurts) {
+                continue;
+            }
+
+            const distance = Math.max(Math.abs(dx), Math.abs(dy));
+
+            if (!best || distance < best.distance) {
+                best = { pos: new RoomPosition(x, y, room.name), distance };
+            }
+        }
+    }
+
+    return best?.pos ?? null;
+}
+
 
 /**
  * Возвращает множество клеток, с которых харвестер может сдать энергию
