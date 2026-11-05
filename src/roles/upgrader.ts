@@ -28,7 +28,8 @@ import {
     isSourceSaturated,
     moveCached,
     blocksBirthRing,
-    collectHarvestSlotKeys
+    collectHarvestSlotKeys,
+    runStepAside
 } from '../utilities';
 import { UPGRADE_RANGE, UPGRADE_SPOT_VERSION } from '../constants';
 
@@ -238,6 +239,13 @@ function runDonorMode(creep: Creep): void {
  * @param creep Крип с `role === ROLE.UPGRADER`.
  */
 export function run(creep: Creep): void {
+    // Сдвиг в сторону — исключение из правил роли: он важнее апгрейда,
+    // потому что без него другой наш крип простаивает взаперти (см.
+    // `ensureCreepsNotConfined` в `room.ts`).
+    if (runStepAside(creep)) {
+        return;
+    }
+
     if (typeof creep.memory.upgrading !== 'boolean') {
         creep.memory.upgrading = false;
     }
