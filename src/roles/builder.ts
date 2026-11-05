@@ -25,7 +25,8 @@ import {
     isSourceSaturated,
     upgradeRoomController,
     withdrawEnergy,
-    moveCached
+    moveCached,
+    runStepAside
 } from '../utilities';
 
 /**
@@ -156,6 +157,13 @@ function stepOffHarvestSlots(creep: Creep): void {
  * @param creep Крип с `role === ROLE.BUILDER`.
  */
 export function run(creep: Creep): void {
+    // Сдвиг в сторону — исключение из правил роли: он важнее стройки,
+    // потому что без него другой наш крип простаивает взаперти (см.
+    // `ensureCreepsNotConfined` в `room.ts`).
+    if (runStepAside(creep)) {
+        return;
+    }
+
     if (typeof creep.memory.building !== 'boolean') {
         creep.memory.building = false;
     }

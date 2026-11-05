@@ -28,7 +28,8 @@ import {
     CONTAINER_BUILD_COST,
     STORAGE_BUILD_COST,
     DELIVERY_STRUCTURE_CHECK_INTERVAL,
-    BUILDER_RESERVE_ENERGY
+    BUILDER_RESERVE_ENERGY,
+    CONFINED_REGION_MIN_GROWTH
 } from './constants';
 import { trySpawn } from './spawn';
 import {
@@ -45,6 +46,9 @@ import {
     findDeliveryStructureSpot,
     measureDeliveryDistance,
     bodyCost,
+    findStepAsideTarget,
+    creepBlocksSomebody,
+    regionForCreep,
     type SpawnRingInfo
 } from './utilities';
 import * as log from './log';
@@ -113,6 +117,7 @@ export function run(room: Room): void {
     ensureSpawnAccessible(room);
     ensureSpawnRingReserve(room);
     ensureBirthExit(room);
+    ensureCreepsNotBlocking(room);
     updateSourceSaturation(room, counts);
     updateIncomeRate(room);
 
@@ -1582,6 +1587,90 @@ function ensureBirthExit(room: Room): void {
             `the birth ring of spawn ${spawn.name} in ${room.name} is closed and nothing ` +
             'can be removed to open it: new creeps will be trapped inside'
         );
+    }
+}
+
+/**
+ * Разблокирует наших крипов, которых запирают собственные же собратья.
+ *
+ * @remarks
+ * Крипы — препятствия для движения: движок не поставит крипа на клетку,
+ * занятую другим крипом, и путь в такую клетку не находится вовсе. Поэтому
+ * наш рабочий, вставший на выход из кармана, запирает там другого нашего
+ * крипа — и тот простаивает: не добывает, не строит, не качает контроллер.
+ *
+ * В E34S53 «карман» со спавном занимал шесть клеток, и все шесть были
+ * заняты нашими крипами: харвестером (заперт в тупике (19,25)), вторым
+ * харвестером, апгрейдером и билдером на выходе (21,27). Из-за этого
+ * каждый новый харвестер рождался в кармане и не мог из него выйти — треть
+ * дохода комнаты не добывалась, а билдер, которому нечем было заняться,
+ * стоял на выходе и держал карман запертым.
+ *
+ * Здесь мы ищем крипов, которые запирают кого-то из наших ({@link
+ * creepBlocksSomebody}), и говорим им отойти в сторону ({@link
+ * findStepAsideTarget}). Клетка сдвига записывается в
+ * `creep.memory._stepAside`, и роль её выполняет.
+ *
+ * Проверка идёт раз в {@link EXTENSION_CHECK_INTERVAL} тиков и только когда
+ * запирание действительно есть, поэтому в обычной комнате она ничего не
+ * стоит.
+ *
+ * @param room Комната, которой мы владеем.
+ */
+function ensureCreepsNotBlocking(room: Room): void {
+    if (
+        room.memory._confinedCheckTick &&
+        Game.time - room.memory._confinedCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._confinedCheckTick = Game.time;
+
+    const ourCreeps = room.find(FIND_MY_CREEPS);
+    const harvestSlots = collectHarvestSlotKeys(room);
+    const regions = new Map<string, Set<string>>();
+
+    for (const creep of ourCreeps) {
+        regions.set(creep.name, regionForCreep(room, creep));
+    }
+
+    for (const creep of ourCreeps) {
+        const key = `${creep.pos.x},${creep.pos.y}`;
+
+        // Харвестер на клетке добычи работает: это его место, и «сдвиг» здесь
+        // означал бы только потерю дохода.
+        if (harvestSlots.has(key)) {
+            delete creep.memory._stepAside;
+            delete creep.memory._stepAsideTick;
+            continue;
+        }
+
+        // Сдвиг уже назначен и ещё не выполнен — не пересчитываем.
+        if (creep.memory._stepAside) {
+            continue;
+        }
+
+        // Сдвиг для этого крипа однажды не получился: больше не пробуем.
+        if (creep.memory._stepAsideFailed) {
+            continue;
+        }
+
+        if (!creepBlocksSomebody(room, creep, regions)) {
+            delete creep.memory._stepAside;
+            delete creep.memory._stepAsideTick;
+            continue;
+        }
+
+        const target = findStepAsideTarget(room, creep, regions);
+
+        if (target) {
+            creep.memory._stepAside = { x: target.x, y: target.y };
+            creep.memory._stepAsideTick = Game.time;
+        } else {
+            delete creep.memory._stepAside;
+            delete creep.memory._stepAsideTick;
+        }
     }
 }
 

@@ -24,7 +24,8 @@ import {
     transferEnergy,
     findEnergyTransferTarget,
     deliveryTripLoad,
-    upgradeRoomController
+    upgradeRoomController,
+    runStepAside
 } from '../utilities';
 
 /**
@@ -35,6 +36,13 @@ import {
  *              спавне через `_harvesterIndex`).
  */
 export function run(creep: Creep): void {
+    // Сдвиг в сторону — исключение из правил роли, но только когда рюкзак
+    // пуст: нести энергию в сторону бессмысленно, рейс пропадёт (см.
+    // `ensureCreepsNotConfined` в `room.ts`).
+    if (creep.store[RESOURCE_ENERGY] === 0 && runStepAside(creep)) {
+        return;
+    }
+
     const transferTarget = findEnergyTransferTarget(creep, [
         STRUCTURE_SPAWN,
         STRUCTURE_EXTENSION,
