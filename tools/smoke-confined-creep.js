@@ -74,8 +74,8 @@ Object.assign(global, C, {
     CREEP_LIFE_TIME: 1500,
     MAX_CREEP_SIZE: 50,
     OK: 0, ERR_BUSY: -4, ERR_NOT_ENOUGH_ENERGY: -6, ERR_INVALID_ARGS: -10,
-    ERR_NAME_EXISTS: -3, ERR_RCL_NOT_ENOUGH: -14, ERR_NOT_OWNER: -13,
-    ERR_INVALID_TARGET: -9, ERR_FULL: -5, ERR_TIRED: -6, ERR_NO_PATH: -4, ERR_NOT_IN_RANGE: -5,
+    ERR_NAME_EXISTS: -3, ERR_RCL_NOT_ENOUGH: -14, ERR_NOT_OWNER: -1,
+    ERR_INVALID_TARGET: -7, ERR_FULL: -8, ERR_TIRED: -11, ERR_NO_PATH: -2, ERR_NOT_IN_RANGE: -9,
     MOVE: 'move', WORK: 'work', CARRY: 'carry', ATTACK: 'attack',
     RANGED_ATTACK: 'ranged_attack', TOUGH: 'tough', HEAL: 'heal', CLAIM: 'claim',
     CONTROLLER_STRUCTURES: {
@@ -239,19 +239,32 @@ function makeRoom(opts) {
         memory: Object.assign({ role, homeRoom: 'E34S53' }, memory || {}),
         room: null,
         moveTo(target) {
-            movedCreeps.push([this.name, this.pos.x, this.pos.y, target.x, target.y]);
+            // The engine moves to the tile of a structure, not to the
+            // structure itself: `moveCached` hands over the object.
+            const p = target.pos || target;
+            movedCreeps.push([this.name, this.pos.x, this.pos.y, p.x, p.y]);
             return OK;
         },
-        upgradeController() { return OK; },
+        // The engine refuses to work at a distance: `upgradeController` works
+        // within range 3, `withdraw` only next to the structure.
+        upgradeController(controller) {
+            const dx = Math.abs(this.pos.x - controller.pos.x);
+            const dy = Math.abs(this.pos.y - controller.pos.y);
+            return Math.max(dx, dy) <= 3 ? OK : -9;
+        },
         moveByPath() { return -4; },
         harvest(target) {
             const dx = Math.abs(this.pos.x - target.pos.x);
             const dy = Math.abs(this.pos.y - target.pos.y);
-            return Math.max(dx, dy) <= 1 ? OK : -5;
+            return Math.max(dx, dy) <= 1 ? OK : ERR_NOT_IN_RANGE;
         },
         transfer() { return OK; },
-        withdraw() { return -5; },
-        build() { return -6; }
+        withdraw(target) {
+            const dx = Math.abs(this.pos.x - target.pos.x);
+            const dy = Math.abs(this.pos.y - target.pos.y);
+            return Math.max(dx, dy) <= 1 ? OK : -9;
+        },
+        build() { return ERR_NOT_IN_RANGE; }
     }));
 
     const source = { type: 'source', pos: pos(19, 23), energy: 3000, room: null };

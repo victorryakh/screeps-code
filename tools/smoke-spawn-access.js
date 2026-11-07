@@ -250,10 +250,15 @@ const bot = require(require('path').join(__dirname, '..', 'dist', 'main.js'));
 // A ring cell is freed either by removing a construction site on it or by
 // demolishing a ring-1 extension. Both are legitimate; what matters is that
 // the cell is released.
+//
+// The bot may also cancel construction sites OUTSIDE the ring: the room
+// drops the extensions it cannot pay for (`cancelUnaffordableExtensionSites`
+// in `src/room.ts`). Such a site is not a birth tile, so it does not affect
+// the ring - only the demolition of a structure does.
 function ringFreed() {
     const onRing = ([x, y]) => Math.max(Math.abs(x - 19), Math.abs(y - 26)) === 1;
-    return (removedSites.length >= 1 || destroyed.length >= 1) &&
-        removedSites.every(onRing) && destroyed.every(onRing);
+    const ringRemoved = removedSites.filter(onRing);
+    return (ringRemoved.length >= 1 || destroyed.length >= 1) && destroyed.every(onRing);
 }
 
 function runTicks(sim, n, step) {

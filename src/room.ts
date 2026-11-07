@@ -28,8 +28,7 @@ import {
     CONTAINER_BUILD_COST,
     STORAGE_BUILD_COST,
     DELIVERY_STRUCTURE_CHECK_INTERVAL,
-    BUILDER_RESERVE_ENERGY,
-    CONFINED_REGION_MIN_GROWTH
+    BUILDER_RESERVE_ENERGY
 } from './constants';
 import { trySpawn } from './spawn';
 import {
@@ -116,6 +115,12 @@ export function run(room: Room): void {
     ensureSpawn(room);
     ensureSpawnAccessible(room);
     ensureSpawnRingReserve(room);
+
+    // Площадки расширений, которые комната не оправдывает, снимаются
+    // после разбора кольца рождения: кольцо важнее — там спавн, и его
+    // разблокировка может потребовать снести постройку.
+    cancelUnaffordableExtensionSites(room, layout.maxExtensions);
+
     ensureBirthExit(room);
     ensureCreepsNotBlocking(room);
     updateSourceSaturation(room, counts);
@@ -310,6 +315,75 @@ function ensureSpawn(room: Room): void {
  * @param room   Комната, для которой планируются расширения.
  * @param layout Решение планировки, возвращённое {@link planBaseLayout}.
  */
+/**
+ * Снимает construction sites расширений, которые комната не оправдывает.
+ *
+ * @remarks
+ * Ограничение {@link affordableExtensions} работало только на заказ новых
+ * площадок: уже заказанные сайты оно не трогало. В E34S53 накопилось
+ * 11 расширений и ещё 7 площадок — 21 000 энергии, которые комната не
+ * зарабатывает даже за 7800 тиков. Ни одна из этих площадок не стоит
+ * рядом с клеткой добычи, то есть достройка не сокращала бы доставку и не
+ * подняла бы доход: это чистый расход дохода в ущерб апгрейду контроллера.
+ * Хуже того, билдер выбирал площадку поближе и тратил на неё всё, что
+ * мог накопить комната.
+ *
+ * Поэтому площадки, которые комната не может оправдать, снимаются: иначе
+ * они навсегда занимают клетки и место в лимите RCL, а билдер — время.
+ *
+ * Что оставляется: площадки рядом с клеткой добычи (они сокращают
+ * доставку и поднимают доход — единственные, что ещё окупаются), затем —
+ * самые близкие к завершению (в них уже вложена энергия).
+ *
+ * @param room       Комната.
+ * @param affordable Сколько расширений комната может оправдать.
+ */
+function cancelUnaffordableExtensionSites(room: Room, affordable: number): void {
+    if (!Number.isFinite(affordable)) {
+        // Ограничения нет — снимать нечего.
+        return;
+    }
+
+    const existingExtensions = room.find(FIND_MY_STRUCTURES, {
+        filter: (s) => s.structureType === STRUCTURE_EXTENSION
+    }).length;
+
+    const extensionSites = room.find(FIND_MY_CONSTRUCTION_SITES, {
+        filter: (s) => s.structureType === STRUCTURE_EXTENSION
+    });
+
+    const allowance = Math.max(0, affordable - existingExtensions);
+
+    if (extensionSites.length <= allowance) {
+        return;
+    }
+
+    const delivery = collectDeliveryTileKeys(room);
+
+    const ranked = [...extensionSites].sort((a, b) => {
+        const deliveryDiff =
+            (delivery.has(`${b.pos.x},${b.pos.y}`) ? 1 : 0) -
+            (delivery.has(`${a.pos.x},${a.pos.y}`) ? 1 : 0);
+
+        if (deliveryDiff !== 0) {
+            return deliveryDiff;
+        }
+
+        return b.progress - a.progress;
+    });
+
+    for (const site of ranked.slice(allowance)) {
+        const removed = (site as ConstructionSite & { remove?: () => number }).remove?.();
+
+        if (removed === OK) {
+            log.info(
+                'room',
+                `cancelled extension site at ${site.pos.x},${site.pos.y} in ${room.name} — the room cannot pay for it`
+            );
+        }
+    }
+}
+
 function ensureExtensions(room: Room, layout: BaseLayoutDecision): void {
     if (
         room.memory._extensionCheckTick &&

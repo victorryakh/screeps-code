@@ -99,8 +99,8 @@ Object.assign(global, C, {
     CREEP_LIFE_TIME: 1500,
     MAX_CREEP_SIZE: 50,
     OK: 0, ERR_BUSY: -4, ERR_NOT_ENOUGH_ENERGY: -6, ERR_INVALID_ARGS: -10,
-    ERR_NAME_EXISTS: -3, ERR_RCL_NOT_ENOUGH: -14, ERR_NOT_OWNER: -13,
-    ERR_INVALID_TARGET: -9, ERR_FULL: -5, ERR_TIRED: -6, ERR_NO_PATH: -4, ERR_NOT_IN_RANGE: -9,
+    ERR_NAME_EXISTS: -3, ERR_RCL_NOT_ENOUGH: -14, ERR_NOT_OWNER: -1,
+    ERR_INVALID_TARGET: -7, ERR_FULL: -8, ERR_TIRED: -11, ERR_NO_PATH: -2, ERR_NOT_IN_RANGE: -9,
     MOVE: 'move', WORK: 'work', CARRY: 'carry', ATTACK: 'attack',
     RANGED_ATTACK: 'ranged_attack', TOUGH: 'tough', HEAL: 'heal', CLAIM: 'claim',
     CONTROLLER_STRUCTURES: {
@@ -273,7 +273,9 @@ function makeRoom(opts) {
     opts = opts || {};
     const creeps = (opts.creeps || []).map(([x, y, role, energy]) => makeCreep(x, y, role, energy));
     const sites = (opts.sites || []).map(([x, y, progress]) => ({
-        structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, progress: progress || 0, progressTotal: 3000, room: null
+        structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, progress: progress || 0, progressTotal: 3000, room: null,
+        removed: false,
+        remove() { this.removed = true; return OK; }
     }));
     const extensions = (opts.extensions || []).map(([x, y, energy]) => ({
         structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, hits: 1000, hitsMax: 1000,
@@ -345,7 +347,11 @@ function makeRoom(opts) {
         },
         createConstructionSite(x, y, structureType) {
             createdSites.push([x, y, structureType]);
-            sites.push({ structureType, pos: pos(x, y), my: true, progress: 0, progressTotal: 3000, room });
+            sites.push({
+                structureType, pos: pos(x, y), my: true, progress: 0, progressTotal: 3000, room,
+                removed: false,
+                remove() { this.removed = true; return OK; }
+            });
             return OK;
         },
         lookAt(x, y) { return []; }
@@ -1027,6 +1033,137 @@ function actions(creep, kind) {
     check('a harvester does not claim a tile another harvester stands on',
         !last || taken.indexOf(`${last.x},${last.y}`) === -1,
         JSON.stringify({ taken, last }));
+}
+
+// --- Scenario 20: the builder is not blocked by a price the room cannot pay -
+// The affordability check compared the room's balance with the FULL price of
+// the site. In E34S53 the room can hold at most 850 energy (spawn 300 plus
+// eleven extensions of 50) while an extension costs 3000, so the condition
+// `energyAvailable >= remaining + 300` could never hold. The builder stood
+// in place for days, never built anything, and the colony paid for a creep
+// that did no work.
+//
+// The builder builds in chunks: its backpack is its budget for one trip.
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 50],
+            [20, 23, 'harvester', 50],
+            [20, 24, 'harvester', 50],
+            [20, 21, 'upgrader', 0],
+            [19, 27, 'builder', 0]
+        ],
+        // The real balance of E34S53: the room holds far less than one
+        // extension costs - 850 of capacity against a price of 3000.
+        spawnEnergy: 300,
+        extensions: [[21, 24, 50], [20, 28, 50], [18, 28, 50]],
+        sites: [[21, 28, 0]]
+    });
+
+    runTicks(sim, 1);
+
+    const builder = sim.creeps[4];
+    const kept = sim.sites.filter((s) => !s.removed);
+
+    check('the builder takes energy for the site instead of waiting forever',
+        builder.actions.length > 0,
+        JSON.stringify({ balance: sim.room.energyAvailable, actions: builder.actions }));
+    check('the site the builder works on survives the cleanup',
+        kept.length === 1,
+        JSON.stringify(kept.map((s) => `${s.pos.x},${s.pos.y}`)));
+}
+
+// --- Scenario 21: the builder still waits when the room cannot fund a trip -
+// Control for the check above: the chunk must leave the workers' reserve
+// alone. With 350 energy in the room the builder may not start a trip
+// (a backpack of 100 plus the 300 reserve).
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 50],
+            [20, 23, 'harvester', 50],
+            [20, 24, 'harvester', 50],
+            [20, 21, 'upgrader', 0],
+            [19, 27, 'builder', 0]
+        ],
+        spawnEnergy: 300,
+        extensions: [[21, 24, 50]],
+        sites: [[21, 28, 0]]
+    });
+
+    runTicks(sim, 1);
+
+    const builder = sim.creeps[4];
+
+    check('the builder waits when the room cannot fund one trip',
+        builder.actions.length === 0,
+        JSON.stringify({ balance: sim.room.energyAvailable, actions: builder.actions }));
+}
+
+// --- Scenario 22: extension sites the room cannot justify are cancelled ----
+// The affordable-extensions limit only ever stopped the bot from ORDERING
+// new sites; the ones already ordered stayed forever. E34S53 carried seven
+// of them (21 000 energy) that the room earns in 7 800 ticks, and none of
+// them stood next to a harvest tile, so building them would not have
+// shortened the delivery at all.
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 50],
+            [20, 23, 'harvester', 50],
+            [20, 24, 'harvester', 50]
+        ],
+        spawnEnergy: 300,
+        extensions: [
+            [18, 26, 50], [18, 27, 50], [21, 26, 50], [20, 28, 50], [18, 28, 50],
+            [19, 28, 50], [17, 27, 50], [17, 26, 50], [20, 25, 50], [21, 24, 50], [21, 25, 50]
+        ],
+        sites: [[21, 28, 0], [19, 29, 0]]
+    });
+
+    // The measured income of the room: 2.69 energy/tick, so the room can
+    // afford floor(2.69) = 2 extensions - and it already has eleven.
+    sim.room.memory._incomeRate = 2.69;
+    sim.room.memory._budgetCheckTick = 0;
+
+    runTicks(sim, 1);
+
+    const stillThere = sim.sites.filter((s) => !s.removed);
+
+    check('extension sites the room cannot pay for are cancelled',
+        stillThere.length === 0,
+        JSON.stringify(stillThere.map((s) => `${s.pos.x},${s.pos.y}`)));
+}
+
+// --- Scenario 23: a site next to a harvest tile survives the cleanup -------
+// A site beside a harvest tile shortens the delivery and raises the income,
+// so it is worth keeping even when the room is over its extension budget.
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 50],
+            [20, 23, 'harvester', 50],
+            [20, 24, 'harvester', 50]
+        ],
+        spawnEnergy: 300,
+        extensions: [[21, 24, 50]],
+        sites: [[21, 21, 0], [21, 28, 0]]
+    });
+
+    sim.room.memory._incomeRate = 2.69;
+    sim.room.memory._budgetCheckTick = 0;
+
+    runTicks(sim, 1);
+
+    const kept = sim.sites.filter((s) => !s.removed).map((s) => `${s.pos.x},${s.pos.y}`);
+    const dropped = sim.sites.filter((s) => s.removed).map((s) => `${s.pos.x},${s.pos.y}`);
+
+    check('a site next to a harvest tile is kept',
+        kept.indexOf('21,21') !== -1,
+        JSON.stringify({ kept, dropped }));
+    check('a site far from the harvest tiles is dropped',
+        dropped.indexOf('21,28') !== -1,
+        JSON.stringify({ kept, dropped }));
 }
 
 const failed = results.filter((r) => !r.ok);
