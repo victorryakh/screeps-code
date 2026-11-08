@@ -80,6 +80,7 @@ Object.assign(global, C, {
     RANGED_ATTACK: 'ranged_attack', TOUGH: 'tough', HEAL: 'heal', CLAIM: 'claim',
     CONTROLLER_STRUCTURES: {
         [C.STRUCTURE_EXTENSION]: { 0: 0, 1: 0, 2: 3, 3: 5, 4: 10, 5: 20, 6: 30, 7: 40, 8: 60 },
+        [C.STRUCTURE_CONTAINER]: { 0: 5, 1: 5, 2: 5, 3: 5, 4: 5, 5: 5, 6: 5, 7: 5, 8: 5 },
         [C.STRUCTURE_TOWER]: { 0: 0, 1: 0, 2: 0, 3: 1, 4: 2, 5: 3, 6: 4, 7: 5, 8: 6 },
         [C.STRUCTURE_STORAGE]: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1 },
         [C.STRUCTURE_LINK]: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 1, 6: 1, 7: 1, 8: 1 },
@@ -116,6 +117,10 @@ const WALLS = new Set([
 const { installPathFinder } = require('./mock-pathfinder');
 
 const notifications = [];
+
+// When set, every move intent is rejected: the room cannot be left at all.
+// The bot has to keep working where it stands.
+let moveFails = false;
 const createdSites = [];
 let tick = 1000;
 
@@ -211,6 +216,11 @@ function makeCreep(x, y, role, energy) {
         },
         moveTo(target) {
             this.actions.push(['moveTo', target.x, target.y]);
+
+            if (moveFails) {
+                return ERR_NO_PATH;
+            }
+
             return OK;
         },
         moveByPath() { return -4; }
@@ -441,15 +451,45 @@ function actions(creep, kind) {
     });
     runTicks(sim, 1);
     const upgrader = sim.creeps.find((c) => c.memory.role === 'upgrader');
-    const upgrades = actions(upgrader, 'upgrade').length;
+    const moves = actions(upgrader, 'moveTo');
     const harvestSlots = ['20,22', '20,23', '20,24'];
+    const ring = ['18,25', '18,26', '18,27', '19,25', '19,27', '20,25', '20,26', '20,27'];
 
-    check('the upgrader upgrades from where it stands when it is in range',
-        upgrades > 0,
-        `upgrades=${upgrades}`);
+    check('the upgrader leaves the birth ring for its own upgrade spot',
+        moves.length > 0 &&
+            !ring.includes(`${moves[0][1]},${moves[0][2]}`),
+        `moves=${JSON.stringify(moves)}`);
     check('the upgrader does not stand on a harvest slot',
         !harvestSlots.includes(`${upgrader.pos.x},${upgrader.pos.y}`),
         `${upgrader.pos.x},${upgrader.pos.y}`);
+}
+
+// --- Scenario 4b: the upgrader still upgrades when it cannot move ---------
+// The upgrader must never be stuck: if it cannot reach its spot, it has to
+// upgrade where it stands. A hard ban on the birth ring produced a deadlock
+// in E34S53: the upgrader was locked in the pocket next to the spawn, the
+// only exit ran through a cell occupied by another harvester, and the
+// controller stopped receiving progress altogether.
+{
+    const sim = makeRoom({
+        creeps: [
+            [21, 21, 'harvester', 0],
+            [21, 22, 'harvester', 0],
+            [21, 23, 'harvester', 0],
+            [20, 27, 'upgrader', 50]
+        ]
+    });
+
+    moveFails = true;
+    runTicks(sim, 1);
+    moveFails = false;
+
+    const upgrader = sim.creeps.find((c) => c.memory.role === 'upgrader');
+    const upgrades = actions(upgrader, 'upgrade').length;
+
+    check('the upgrader upgrades in place when it cannot move',
+        upgrades > 0,
+        `upgrades=${upgrades}`);
 }
 
 

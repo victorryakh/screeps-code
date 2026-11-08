@@ -46,7 +46,9 @@ export function run(creep: Creep): void {
     const transferTarget = findEnergyTransferTarget(creep, [
         STRUCTURE_SPAWN,
         STRUCTURE_EXTENSION,
-        STRUCTURE_TOWER
+        STRUCTURE_TOWER,
+        STRUCTURE_CONTAINER,
+        STRUCTURE_STORAGE
     ]);
 
     if (transferTarget) {

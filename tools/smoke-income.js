@@ -105,9 +105,9 @@ Object.assign(global, C, {
     RANGED_ATTACK: 'ranged_attack', TOUGH: 'tough', HEAL: 'heal', CLAIM: 'claim',
     CONTROLLER_STRUCTURES: {
         [C.STRUCTURE_EXTENSION]: { 0: 0, 1: 0, 2: 3, 3: 5, 4: 10, 5: 20, 6: 30, 7: 40, 8: 60 },
+        [C.STRUCTURE_CONTAINER]: { 0: 5, 1: 5, 2: 5, 3: 5, 4: 5, 5: 5, 6: 5, 7: 5, 8: 5 },
         [C.STRUCTURE_TOWER]: { 0: 0, 1: 0, 2: 0, 3: 1, 4: 2, 5: 3, 6: 4, 7: 5, 8: 6 },
         [C.STRUCTURE_STORAGE]: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1 },
-        [C.STRUCTURE_CONTAINER]: { 0: 0, 1: 0, 2: 0, 3: 2, 4: 3, 5: 3, 6: 3, 7: 3, 8: 3 },
         [C.STRUCTURE_LINK]: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 1, 6: 1, 7: 1, 8: 1 },
         [C.STRUCTURE_LAB]: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 1, 7: 1, 8: 1 }
     },
@@ -190,7 +190,7 @@ function makeStore(energy, capacity) {
     };
 }
 
-function makeCreep(x, y, role, energy) {
+function makeCreep(x, y, role, energy, extra) {
     const bodyParts = (BODIES[role] || BODIES.harvester).map((type) => ({ type, hits: 100 }));
     const capacity = bodyParts.filter((p) => p.type === 'carry').length * 50;
     const store = {
@@ -208,7 +208,7 @@ function makeCreep(x, y, role, energy) {
         fatigue: 0,
         store,
         body: bodyParts,
-        memory: { role, homeRoom: 'E34S53' },
+        memory: Object.assign({ role, homeRoom: 'E34S53' }, extra || {}),
         room: null,
         actions: [],
         harvest(source) {
@@ -271,13 +271,16 @@ function makeCreep(x, y, role, energy) {
 
 function makeRoom(opts) {
     opts = opts || {};
-    const creeps = (opts.creeps || []).map(([x, y, role, energy]) => makeCreep(x, y, role, energy));
+    const creeps = (opts.creeps || []).map(
+        ([x, y, role, energy, extra]) => makeCreep(x, y, role, energy, extra)
+    );
     const sites = (opts.sites || []).map(([x, y, progress]) => ({
         structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, progress: progress || 0, progressTotal: 3000, room: null,
         removed: false,
         remove() { this.removed = true; return OK; }
     }));
     const extensions = (opts.extensions || []).map(([x, y, energy]) => ({
+        id: `ext-${x}-${y}`,
         structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, hits: 1000, hitsMax: 1000,
         store: makeStore(energy === undefined ? 0 : energy, 50), room: null
     }));
@@ -289,6 +292,7 @@ function makeRoom(opts) {
     };
     const spawnAttempts = [];
     const spawn = {
+        id: 'spawn-1',
         name: 'Spawn1', structureType: C.STRUCTURE_SPAWN, pos: pos(19, 26), my: true,
         store: makeStore(opts.spawnEnergy === undefined ? 300 : opts.spawnEnergy, 300),
         spawning: null, room: null,
@@ -826,6 +830,30 @@ function actions(creep, kind) {
         JSON.stringify(harvester.actions));
 }
 
+// --- Scenario 11b: a stale delivery target does not pin the harvester -----
+// The delivery target is cached for DELIVERY_TARGET_TTL ticks so that the
+// creep does not jump between storages from tick to tick. But the cache must
+// not override the proximity rule: in E34S53 the harvesters were pinned to
+// the spawn for 25 ticks at a time, and the spawn is ten tiles away from the
+// harvest tiles. The measured income was 0.64 energy per tick instead of 6.
+{
+    const sim = makeRoom({
+        extensions: [[21, 24, 40]],
+        creeps: [
+            [20, 24, 'harvester', 100, { _deliveryTarget: { id: 'spawn-1', tick: tick } }]
+        ]
+    });
+
+    runTicks(sim, 1);
+
+    const harvester = sim.creeps[0];
+    const transfers = actions(harvester, 'transfer');
+
+    check('a stale delivery target does not pin the harvester to a far storage',
+        transfers.length > 0 && transfers[0][1] === 21 && transfers[0][2] === 24,
+        JSON.stringify(harvester.actions));
+}
+
 // --- Scenario 12: the harvester approaches a storage to within range 1 ----
 // `moveTo` without `range` builds a path onto the tile of the structure
 // itself. A creep cannot stand there, so the last step never happens and
@@ -1128,7 +1156,12 @@ function actions(creep, kind) {
 
     runTicks(sim, 1);
 
-    const stillThere = sim.sites.filter((s) => !s.removed);
+    // Площадки контейнера — это другая история: «дырка» для энергии
+    // оплачивается отдельно и по своим правилам (см.
+    // `canFundDeliveryStructure`). Здесь проверяем именно расширения.
+    const stillThere = sim.sites.filter(
+        (s) => !s.removed && s.structureType === C.STRUCTURE_EXTENSION
+    );
 
     check('extension sites the room cannot pay for are cancelled',
         stillThere.length === 0,

@@ -26,9 +26,10 @@ import {
     EXTENSION_BUILD_COST,
     EXTENSION_PAYBACK_TICKS,
     CONTAINER_BUILD_COST,
-    STORAGE_BUILD_COST,
     DELIVERY_STRUCTURE_CHECK_INTERVAL,
-    BUILDER_RESERVE_ENERGY
+    BUILDER_RESERVE_ENERGY,
+    BUILDER_TRIP_ENERGY,
+    DELIVERY_BUILD_HORIZON_TICKS
 } from './constants';
 import { trySpawn } from './spawn';
 import {
@@ -633,6 +634,31 @@ function needsDeliveryRepair(room: Room): boolean {
 }
 
 /**
+ * Может ли комната довести «дырку» для энергии до конца.
+ *
+ * @remarks
+ * Полная стоимость контейнера (5000) недостижима сразу: ёмкость структур
+ * комнаты ограничена (в E34S53 — 850), поэтому условие «в комнате есть
+ * 5300 энергии» не выполнялось никогда и код планирования «дырки» был
+ * мёртвым.
+ *
+ * Правильный вопрос не «сколько есть сейчас», а «хватит ли запаса
+ * комнаты и её дохода, чтобы довести стройку до конца». Запас плюс доход
+ * за горизонт {@link DELIVERY_BUILD_HORIZON_TICKS} тиков — и есть
+ * достаточность.
+ *
+ * @param room Комната.
+ * @returns `true`, если комната в состоянии оплатить «дырку».
+ */
+function canFundDeliveryStructure(room: Room, cost: number): boolean {
+    const income = room.memory._incomeRate ?? 0;
+
+    return (
+        room.energyAvailable + income * DELIVERY_BUILD_HORIZON_TICKS >= cost
+    );
+}
+
+/**
  * Планирует «дырку» для энергии рядом с источником: контейнер, а на
  * RCL 4 и выше — ещё и хранилище.
  *
@@ -642,11 +668,14 @@ function needsDeliveryRepair(room: Room): boolean {
  * энергию через полкомнаты, и доход падает в разы — дорога занимает столько
  * же времени, сколько добыча.
  *
- * Контейнер стоит 300 энергий и вмещает 1000. Он окупается за несколько
- * сотен тиков: харвестер начинает сдавать энергию в шаг от источника.
+ * Контейнер вмещает 1000 и стоит 5000. Он окупается за несколько сотен
+ * тиков: харвестер начинает сдавать энергию в шаг от источника, а
+ * апгрейдер забирает её из контейнера обратно (`findEnergyDonor` умеет
+ * брать энергию и из контейнеров) — иначе энергия в контейнере была бы
+ * заперта, а комната её не тратила.
  *
- * Заказ площадки — только если комната может оплатить стройку и при этом
- * не съесть запас рабочих (см. {@link BUILDER_RESERVE_ENERGY}).
+ * Заказ площадки — только если комната в состоянии довести её до конца
+ * (см. {@link canFundDeliveryStructure}).
  *
  * @param room Комната.
  */
@@ -673,75 +702,92 @@ function ensureDeliveryStructures(room: Room): void {
 
     room.memory._deliveryStructureCheckTick = Game.time;
 
-    for (const type of [STRUCTURE_CONTAINER, STRUCTURE_STORAGE]) {
-        const limit = CONTROLLER_STRUCTURES[type]?.[rcl] ?? 0;
+    // Планируем только контейнер: он 1×1, стоит 5000 и вмещает 1000.
+    // Хранилище — 2×2 и стоит 30000, под него нужен отдельный расчёт
+    // площадки (четыре клетки), а выигрыш у комнаты E34S53 такой же.
+    const type = STRUCTURE_CONTAINER;
+    const limit = CONTROLLER_STRUCTURES[type]?.[rcl] ?? 0;
 
-        if (!limit) {
-            continue;
-        }
+    if (!limit) {
+        return;
+    }
 
-        const built = room.find(FIND_MY_STRUCTURES, {
-            filter: (s) => s.structureType === type
-        }).length;
-        const sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
-            filter: (s) => s.structureType === type
-        }).length;
+    // Контейнеры не входят в `FIND_MY_STRUCTURES`: у них нет владельца.
+    // Считаем их отдельно, иначе построенный контейнер не учитывался бы
+    // и бот заказал бы второй.
+    const built = room.find(FIND_STRUCTURES, {
+        filter: (s) => s.structureType === type
+    }).length;
+    const sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
+        filter: (s) => s.structureType === type
+    }).length;
 
-        if (built + sites >= limit) {
-            continue;
-        }
+    if (built + sites >= limit) {
+        return;
+    }
 
-        const cost =
-            type === STRUCTURE_CONTAINER ? CONTAINER_BUILD_COST : STORAGE_BUILD_COST;
+    const cost = CONTAINER_BUILD_COST;
 
-        if (built + sites > 0) {
-            // Уже есть такая «дырка» — вторая не нужна. Но если комната
-            // не может её оплатить, площадка только занимает клетку и
-            // место в лимите RCL: снимаем её.
-            const hopeless = room.energyAvailable < cost + BUILDER_RESERVE_ENERGY;
+    if (built + sites > 0) {
+        // Уже есть такая «дырка» — вторая не нужна. Снимаем площадку только
+        // когда комната действительно не в состоянии её закончить: временное
+        // падение дохода не повод выбрасывать вложенную в стройку энергию.
+        const hopeless =
+            room.energyAvailable < BUILDER_RESERVE_ENERGY &&
+            (room.memory._incomeRate ?? 0) <= 0;
 
-            if (hopeless) {
-                for (const site of room.find(FIND_MY_CONSTRUCTION_SITES, {
-                    filter: (c) => c.structureType === type
-                })) {
-                    (site as ConstructionSite & { remove?: () => number }).remove?.();
-                }
+        if (hopeless) {
+            for (const site of room.find(FIND_MY_CONSTRUCTION_SITES, {
+                filter: (c) => c.structureType === type
+            })) {
+                (site as ConstructionSite & { remove?: () => number }).remove?.();
             }
-
-            continue;
-        }
-
-        // Покупка должна окупаться. Контейнер в E34S53 стоит 5000 энергий,
-        // а комната зарабатывает несколько в тик и держит запас для
-        // рабочих: такая покупка съела бы запас, и вместо доставки
-        // получился бы замороженный контроллер. Поэтому «дырку» заказываем
-        // только когда комната может оплатить её целиком, не трогая запас.
-        if (room.energyAvailable < cost + BUILDER_RESERVE_ENERGY) {
-            continue;
-        }
-
-        const spot = findDeliveryStructureSpot(room);
-
-        if (!spot) {
-            continue;
-        }
-
-        const result = room.createConstructionSite(spot.x, spot.y, type);
-
-        if (result === OK) {
-            log.info(
-                'room',
-                `planned ${type} at ${spot.x},${spot.y} in ${room.name} — delivery to the source is too long`
-            );
         }
 
         return;
+    }
+
+    // Покупка должна окупаться. Контейнер в E34S53 стоит 5000 энергий, а
+    // комната зарабатывает несколько в тик: такая покупка съела бы запас, и
+    // вместо доставки получился бы замороженный контроллер. Поэтому «дырку»
+    // заказываем только когда комната в состоянии довести её до конца —
+    // за счёт запаса и дохода.
+    if (!canFundDeliveryStructure(room, cost)) {
+        return;
+    }
+
+    const spot = findDeliveryStructureSpot(room);
+
+    if (!spot) {
+        return;
+    }
+
+    const result = room.createConstructionSite(spot.x, spot.y, type);
+
+    if (result === OK) {
+        log.info(
+            'room',
+            `planned ${type} at ${spot.x},${spot.y} in ${room.name} — delivery to the source is too long`
+        );
     }
 }
 
 /**
  * Может ли билдер работать: хватает ли комнате энергии на саму стройку,
  * сохранив запас для рабочих.
+ *
+ * @remarks
+ * Сравнивать надо с тем, что билдер увозит за один заход, а не с полной
+ * стоимостью площадки. Полная стоимость недостижима принципиально: комната
+ * копит энергию в структурах, а их суммарная ёмкость в E34S53 — 850
+ * (спавн 300 + расширения по 50), тогда как контейнер стоит 5000. Условие
+ * «в комнате есть 5300 энергии» не может выполниться никогда, и билдер
+ * стоял и ждал, не построив ничего: колония платила за крипа, который не
+ * делал работы.
+ *
+ * Площадка набирает прогресс за несколько заходов, поэтому «может ли
+ * билдер работать» — это «хватает ли энергии на один заход плюс запас для
+ * апгрейдера».
  *
  * @param room Комната.
  * @returns `true`, если билдеру можно брать энергию из структур.
@@ -768,7 +814,10 @@ function builderCanWork(room: Room): boolean {
         return false;
     }
 
-    return room.energyAvailable >= remaining + BUILDER_RESERVE_ENERGY;
+    // Один заход билдера: столько энергии он увозит с собой за раз.
+    const trip = Math.min(remaining, BUILDER_TRIP_ENERGY);
+
+    return room.energyAvailable >= trip + BUILDER_RESERVE_ENERGY;
 }
 
 /**

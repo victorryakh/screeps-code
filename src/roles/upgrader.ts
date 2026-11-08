@@ -22,151 +22,13 @@ import {
     harvestEnergy,
     findClosestSource,
     findEnergyDonor,
-    findUpgradeSpot,
     withdrawEnergy,
     upgradeRoomController,
+    tryUpgradeInPlace,
     isSourceSaturated,
-    moveCached,
-    blocksBirthRing,
-    collectHarvestSlotKeys,
+    upgradeFromWorkSpot,
     runStepAside
 } from '../utilities';
-import { UPGRADE_RANGE, UPGRADE_SPOT_VERSION } from '../constants';
-
-/**
- * Проверяет, что клетка занята не под крипа: клетки добычи принадлежат
- * харвестерам, клетки рождения — спавну.
- *
- * @param room Комната.
- * @param x    X клетки.
- * @param y    Y клетки.
- * @returns `true`, если на клетке нельзя стоять рабочему крипу.
- */
-function isReservedTile(room: Room, x: number, y: number): boolean {
-    if (blocksBirthRing(room, x, y)) {
-        return true;
-    }
-
-    return collectHarvestSlotKeys(room).has(`${x},${y}`);
-}
-
-/**
- * Апгрейдит контроллер «здесь и сейчас», если крип уже в зоне апгрейда.
- *
- * @remarks
- * Апгрейд работает с расстояния 3 (`upgradeController` проверяет
- * `inRangeTo(pos, 3)`), поэтому идти ради апгрейда в другую часть комнаты
- * незачем. Раньше апгрейдер шёл к заранее выбранной клетке и апгрейдил
- * контроллер только после того, как до неё добрался. В E34S53 клетка
- * оказывалась в пятнадцати шагах по пути, крип туда не доходил — и
- * контроллер не получал ни единицы прогресса, хотя энергия у крипа была.
- *
- * На клетке добычи апгрейдить нельзя: она принадлежит харвестерам, и
- * занять её — значит отнять у комнаты треть дохода.
- *
- * Клетка рождения — другое дело: там апгрейд разрешён. В E34S53 крип,
- * запертый в «кармане» у спавна, был в зоне апгрейда, но правило «не стоять
- * на кольце рождения» запрещало ему апгрейдить — и контроллер снова замер.
- * Кольцом рождения занимается отдельная проверка в `room.ts`
- * ({@link ensureSpawnRingReserve}), которая сдвигает крипов с кольца, когда
- * это возможно; запрещать апгрейд из-за клетки нельзя — иначе запертый
- * крип просто не работает.
- *
- * @param creep Крип-апгрейдер.
- * @returns `true`, если контроллер был апгрейднут.
- */
-function tryUpgradeInPlace(creep: Creep): boolean {
-    const controller = creep.room.controller;
-
-    if (!controller || !controller.my) {
-        return false;
-    }
-
-    // Расстояние считаем сами (шквал Хеви): движок проверяет ровно это же
-    // условие в `upgradeController`, а считать его явно позволяет работать
-    // и оффлайн-тестам, где у позиции нет метода `inRangeTo`.
-    const dx = Math.abs(creep.pos.x - controller.pos.x);
-    const dy = Math.abs(creep.pos.y - controller.pos.y);
-
-    if (Math.max(dx, dy) > UPGRADE_RANGE) {
-        return false;
-    }
-
-    if (collectHarvestSlotKeys(creep.room).has(`${creep.pos.x},${creep.pos.y}`)) {
-        // Клетка добычи принадлежит харвестерам: с неё апгрейд лучше не
-        // вести, крип должен уйти на клетку апгрейда. Но если уйти нечем
-        // (усталость, тупик), надо работать здесь: контроллер без
-        // прогресса хуже, чем харвестер, который подождёт пару тиков.
-        //
-        // Без этого запасного пути в тесной комнате апгрейдер застревал
-        // на клетке добычи: он не мог ни уйти, ни качать контроллер, а
-        // харвестер, чья это клетка, не мог копать. В E34S53 контроллер
-        // стоял десятки тиков подряд.
-        if (creep.fatigue <= 0) {
-            return false;
-        }
-    }
-
-    // Клетка рождения — не запрет: спавн от неё страдает только тогда, когда
-    // свободных клеток в кольце не осталось, а этим занимается отдельная
-    // проверка в `room.ts` ({@link ensureSpawnRingReserve}). Запрещать здесь
-    // апгрейд опасно: в E34S53 апгрейдер оказывался заперт в «кармане» у
-    // спавна (единственный выход вёл через клетку, занятую другим крипом) и
-    // не мог ни уйти, ни апгрейдить — контроллер снова замирал.
-
-    return creep.upgradeController(controller) === OK;
-}
-
-/**
- * Возвращает клетку, с которой крипу удобно апгрейдить контроллер, и
- * запоминает её, чтобы не искать заново каждый тик.
- *
- * @param creep Крип-апгрейдер.
- * @returns Клетка для апгрейда или `null`, если подходящей нет.
- */
-function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
-    const room = creep.room;
-    const cached = creep.memory._upgradeSpot;
-
-    if (
-        cached &&
-        cached.roomName === room.name &&
-        creep.memory._upgradeSpotVersion === UPGRADE_SPOT_VERSION
-    ) {
-        const built =
-            room.find(FIND_STRUCTURES, {
-                filter: (s) => s.pos.x === cached.x && s.pos.y === cached.y
-            }).length > 0 ||
-            room.find(FIND_CONSTRUCTION_SITES, {
-                filter: (s) => s.pos.x === cached.x && s.pos.y === cached.y
-            }).length > 0;
-
-        // Кэш живёт дольше одного вызова: за это время клетку могли занять
-        // другой крип, построить на ней расширение или закрыть стройкой.
-        // Проверяем все три случая — иначе апгрейдер ходил бы в
-        // недостижимую клетку, не апгрейдя контроллер.
-        //
-        // Занятый живым крипом кэш НЕ обнуляем: крип подвижен, клетка
-        // освободится, а обнуление кэша означало бы пересчёт клетки
-        // апгрейда каждый тик (PathFinder стоит CPU, а клетка всё равно
-        // та же самая).
-        if (!built && !isReservedTile(room, cached.x, cached.y)) {
-            return new RoomPosition(cached.x, cached.y, cached.roomName);
-        }
-    }
-
-    const spot = findUpgradeSpot(room, creep);
-
-    if (spot) {
-        creep.memory._upgradeSpot = { x: spot.x, y: spot.y, roomName: spot.roomName };
-        creep.memory._upgradeSpotVersion = UPGRADE_SPOT_VERSION;
-    } else {
-        delete creep.memory._upgradeSpot;
-        delete creep.memory._upgradeSpotVersion;
-    }
-
-    return spot;
-}
 
 /**
  * Режим «источник насыщен»: энергия берётся из спавна/расширений.
@@ -210,25 +72,26 @@ function runDonorMode(creep: Creep): void {
 
     creep.memory.upgrading = true;
 
-    // Уже в зоне апгрейда — апгрейдим немедленно. Дорога до «идеальной»
-    // клетки съедает больше энергии, чем сам апгрейд: в E34S53 апгрейдер
-    // шёл пятнадцать клеток к клетке (16,25) и не доходил, и контроллер
-    // не получал ни единицы прогресса.
-    if (tryUpgradeInPlace(creep)) {
-        return;
-    }
-
-    const spot = ensureUpgradeSpot(creep);
-
-    if (spot && !creep.pos.isEqualTo(spot)) {
-        moveCached(creep, spot, {
-            visualizePathStyle: { stroke: '#00ff00' }
-        });
-
-        return;
-    }
-
-    upgradeRoomController(creep, {
+    // Кольцо рождения — не место для постоянной работы.
+    //
+    // В E34S53 апгрейдер стоял на клетке (19,25) — это кольцо рождения
+    // вокруг спавна, и одновременно один из двух выходов из «кармана», где
+    // лежат клетки добычи. Крипы — препятствия для движения, поэтому
+    // апгрейдер на кольце перекрывал коридор: харвестер с полным рюкзаком
+    // не мог пройти к спавну и обходил полкомнаты через болото. Доход
+    // комнаты падал до 0.64 энергии в тик при потолке в 6.
+    //
+    // Своя клетка апгрейда у апгрейдера есть — `findUpgradeSpot` выбирает
+    // её по длине пути до клеток добычи, то есть в E34S53 это (19,21), в
+    // одном шаге от клетки добычи и вне кольца. Но апгрейд с текущей
+    // клетки удаётся (контроллер виден с расстояния 3), поэтому крип
+    // удовлетворялся апгрейдом на месте и никогда не переходил на
+    // выбранную клетку.
+    //
+    // Порядок действий (см. `upgradeFromWorkSpot`): уйти с занятой клетки
+    // на выбранную, а если пути нет — работать на месте: контроллер без
+    // прогресса хуже, чем лишний шаг.
+    upgradeFromWorkSpot(creep, {
         visualizePathStyle: { stroke: '#00ff00' }
     });
 }

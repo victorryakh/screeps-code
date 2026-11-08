@@ -23,7 +23,7 @@ import {
     collectHarvestSlotKeys,
     buildAt,
     isSourceSaturated,
-    upgradeRoomController,
+    upgradeFromWorkSpot,
     withdrawEnergy,
     moveCached,
     runStepAside
@@ -202,7 +202,7 @@ export function run(creep: Creep): void {
             return;
         }
 
-        upgradeRoomController(creep, {
+        upgradeFromWorkSpot(creep, {
             visualizePathStyle: { stroke: '#ffffff' }
         });
 
@@ -240,7 +240,13 @@ export function run(creep: Creep): void {
                 // лишний билдер работает на контроллере тем, что уже есть в
                 // рюкзаке: энергию из структур он не берёт, а с клетки
                 // выхода уходит.
-                upgradeRoomController(creep, {
+                //
+                // `upgradeFromWorkSpot` уводит крипа с кольца рождения на
+                // выбранную клетку апгрейда: в E34S53 билдер стоял на
+                // (19,27) и перекрывал коридор между клетками добычи и
+                // спавном, из-за чего харвестеры обходили полкомнаты, а
+                // доход комнаты был 0.64 энергии в тик.
+                upgradeFromWorkSpot(creep, {
                     visualizePathStyle: { stroke: '#ffffff' }
                 });
 
@@ -314,7 +320,7 @@ export function run(creep: Creep): void {
             return;
         }
 
-        upgradeRoomController(creep, {
+        upgradeFromWorkSpot(creep, {
             visualizePathStyle: { stroke: '#ffffff' }
         });
 

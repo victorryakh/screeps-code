@@ -5,9 +5,11 @@ import {
     BIRTH_BLOCKING_TYPES,
     WALL_TERRAIN,
     UPGRADE_RANGE,
+    UPGRADE_SPOT_VERSION,
     HARVEST_RATE_PER_WORK,
     DELIVERY_TARGET_TTL,
     DELIVERY_FATIGUE_FACTOR,
+    UNREACHABLE_DELIVERY_DISTANCE,
     CONFINED_REGION_MIN_GROWTH,
     STEP_ASIDE_RADIUS,
     STEP_ASIDE_TIMEOUT
@@ -316,6 +318,23 @@ export function transferEnergy(
 }
 
 /**
+ * Может ли комната пользоваться контейнерами.
+ *
+ * @remarks
+ * Контейнеры в Screeps не принадлежат игроку: движок не отдаёт их в
+ * `FIND_MY_STRUCTURES` — у них нет владельца. Поэтому искать их надо в
+ * `FIND_STRUCTURES`, а «своими» считать только контейнеры в своей комнате:
+ * в чужой комнате контейнер может принадлежать другому игроку, и класть
+ * в него энергию нельзя.
+ *
+ * @param room Комната.
+ * @returns `true`, если комната наша и контейнеры в ней можно использовать.
+ */
+function canUseContainer(room: Room): boolean {
+    return room.controller?.my === true;
+}
+
+/**
  * Ищет ближайшую структуру заданного типа, у которой есть свободный объём
  * под `RESOURCE_ENERGY` (например, `SPAWN`/`EXTENSION` по умолчанию).
  *
@@ -360,10 +379,21 @@ export function transferEnergy(
  *
  * Выбранная цель запоминается: пока в ней есть место, харвестер ходит
  * в одно и то же хранилище (см. {@link DELIVERY_TARGET_TTL}).
+ *
+ * **Кэш не перебивает выбор по близости.** Если рядом с клеткой добычи есть
+ * свободное место, харвестер идёт туда, даже если кэш ещё живой и указывает
+ * на дальнее хранилище: кэш живёт {@link DELIVERY_TARGET_TTL} тиков, и
+ * без этого правила харвестер все это время ходил бы через полкомнаты
+ * вместо одного шага.
  */
 export function findEnergyTransferTarget(
     creep: Creep,
-    types: StructureConstant[] = [STRUCTURE_SPAWN, STRUCTURE_EXTENSION]
+    types: StructureConstant[] = [
+        STRUCTURE_SPAWN,
+        STRUCTURE_EXTENSION,
+        STRUCTURE_CONTAINER,
+        STRUCTURE_STORAGE
+    ]
 ): AnyStoreStructure | null {
     const room = creep.room;
 
@@ -371,20 +401,52 @@ export function findEnergyTransferTarget(
         filter: (s): s is AnyStoreStructure =>
             (types as StructureConstant[]).indexOf(s.structureType) !== -1 &&
             'store' in s &&
-            (s as AnyStoreStructure).store.getFreeCapacity(RESOURCE_ENERGY) > 0
+            (s as AnyStoreStructure).store.getFreeCapacity(RESOURCE_ENERGY) > 0 &&
+            // Контейнеры не входят в `FIND_MY_STRUCTURES`, но харвестер
+            // может класть в них энергию: контейнер рядом с источником —
+            // это и есть «дырка», в которую уходит излишек.
+            (s.structureType !== STRUCTURE_CONTAINER || canUseContainer(room))
     }) as AnyStoreStructure[];
 
     if (candidates.length === 0) {
         return null;
     }
 
+    // Хранилище рядом с клеткой добычи — лучший вариант по определению:
+    // харвестер сдаёт энергию, не сходя с клетки (один шаг), и, главное,
+    // не встаёт на кольцо рождения вокруг спавна.
+    //
+    // В E34S53 спавн стоит в «кармане»: подойти к нему можно только по
+    // клеткам кольца рождения. Харвестер, выбравший спавн, вставал на
+    // кольцо, бот сдвигал его с кольца, тот возвращался — и круг замыкался:
+    // крип то ходил, то качал, а не добывал. Расширение рядом с клеткой
+    // добычи снимает проблему целиком: сдача энергии происходит с клетки
+    // добычи, шагать никуда не нужно.
+    const deliveryTiles = collectDeliveryTileKeys(room);
+    const near = candidates.filter((c) =>
+        deliveryTiles.has(`${c.pos.x},${c.pos.y}`)
+    );
+
+    const pool = near.length > 0 ? near : candidates;
+
     // Пока в выбранном хранилище есть место, харвестер ходит в него.
     // Пересчитывать цель каждый тик нельзя: выбор становится неустойчивым,
     // крип метается между хранилищами и часть энергии остаётся в рюкзаке.
+    //
+    // Но кэш не должен перебивать выбор по близости: он живёт
+    // {@link DELIVERY_TARGET_TTL} тиков, и всё это время харвестер ходил бы
+    // в дальний конец комнаты, даже если рядом с источником освободилось
+    // место. В E34S53 это и happened: кэш держал харвестера на спавне, до
+    // которого десять клеток через болото, и доход комнаты был 0.64
+    // энергии в тик при потолке в 6.
+    //
+    // Поэтому кэш применяется только внутри выбранного пула: если рядом с
+    // клеткой добычи есть свободное место — харвестер идёт туда, и кэш
+    // обновляется на нём.
     const cached = creep.memory._deliveryTarget;
 
     if (cached && Game.time - cached.tick < DELIVERY_TARGET_TTL) {
-        const found = candidates.find((c) => c.id === cached.id);
+        const found = pool.find((c) => c.id === cached.id);
 
         if (found) {
             return found;
@@ -408,23 +470,6 @@ export function findEnergyTransferTarget(
     }
 
     const harvestRate = Math.max(1, work * HARVEST_RATE_PER_WORK);
-
-    // Хранилище рядом с клеткой добычи — лучший вариант по определению:
-    // харвестер сдаёт энергию, не сходя с клетки (один шаг), и, главное,
-    // не встаёт на кольцо рождения вокруг спавна.
-    //
-    // В E34S53 спавн стоит в «кармане»: подойти к нему можно только по
-    // клеткам кольца рождения. Х��рвестер, выбравший спавн, вставал на
-    // кольцо, бот сдвигал его с кольца, тот возвращался — и круг замыкался:
-    // крип то ходил, то качал, а не добывал. Расширение рядом с клеткой
-    // добычи снимает проблему целиком: сдача энергии происходит с клетки
-    // добычи, шагать никуда не нужно.
-    const deliveryTiles = collectDeliveryTileKeys(room);
-    const near = candidates.filter((c) =>
-        deliveryTiles.has(`${c.pos.x},${c.pos.y}`)
-    );
-
-    const pool = near.length > 0 ? near : candidates;
 
     let best: AnyStoreStructure | null = null;
     let bestRate = 0;
@@ -459,7 +504,7 @@ export function findEnergyTransferTarget(
         // `(WORK-части + груз) × 2` единиц усталости, и отдых потом
         // растягивает путь в разы. Раньше расстояние учитывалось с
         // коэффициентом 2, и хранилище в четырёх клетках обходилось
-        // дороже хран��лища в одной всего на 3% — харвестер уходил с
+        // дороже хранилища в одной всего на 3% — харвестер уходил с
         // источника за полкомнаты, теряя на дороге больше, чем добывал.
         //
         // Дорога считается по **грузу рейса**, а не по полному рюкзаку:
@@ -1356,10 +1401,15 @@ function isHarvestTileTakenByOther(creep: Creep, tile: RoomPosition): boolean {
 export function findEnergyDonor(creep: Creep): AnyStoreStructure | null {
     const room = creep.room;
 
-    const candidates = room.find(FIND_MY_STRUCTURES, {
+    // Контейнеры — не «свои» структуры: движок не отдаёт их в
+    // `FIND_MY_STRUCTURES` (у контейнера нет владельца). Поэтому ищем в
+    // `FIND_STRUCTURES`, а свои структуры проверяем отдельно.
+    const candidates = room.find(FIND_STRUCTURES, {
         filter: (s) =>
             (s.structureType === STRUCTURE_SPAWN ||
-                s.structureType === STRUCTURE_EXTENSION) &&
+                s.structureType === STRUCTURE_EXTENSION ||
+                s.structureType === STRUCTURE_STORAGE ||
+                (s.structureType === STRUCTURE_CONTAINER && canUseContainer(room))) &&
             'store' in s &&
             (s as AnyStoreStructure).store.energy > 0
     }) as AnyStoreStructure[];
@@ -2199,10 +2249,18 @@ export function hasDeliverySink(room: Room): boolean {
         return false;
     }
 
-    for (const s of room.find(FIND_MY_STRUCTURES)) {
+    // Контейнеры не входят в `FIND_MY_STRUCTURES`: у них нет владельца,
+    // и движок их туда не отдаёт. Искать их надо в `FIND_STRUCTURES` —
+    // иначе построенный контейнер оставался для бота невидимым, и стадия
+    // починки доставки не выключалась даже после того, как «дырка» появилась.
+    for (const s of room.find(FIND_STRUCTURES)) {
         const type = s.structureType as string;
 
         if (type !== STRUCTURE_CONTAINER && type !== STRUCTURE_STORAGE) {
+            continue;
+        }
+
+        if (type === STRUCTURE_CONTAINER && !canUseContainer(room)) {
             continue;
         }
 
@@ -2347,29 +2405,45 @@ function measureDeliveryDistanceUnsafe(room: Room): number {
         return 0;
     }
 
-    const storages = room.find(FIND_MY_STRUCTURES, {
-        filter: (s) =>
-            s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION
-    });
+    const storages = room.find(FIND_STRUCTURES, {
+        filter: (s): s is AnyStoreStructure =>
+            (s.structureType === STRUCTURE_SPAWN ||
+                s.structureType === STRUCTURE_EXTENSION ||
+                s.structureType === STRUCTURE_STORAGE ||
+                (s.structureType === STRUCTURE_CONTAINER && canUseContainer(room))) &&
+            'store' in s
+    }) as AnyStoreStructure[];
 
     if (storages.length === 0) {
         return 0;
     }
 
-    // Считаем расстояние до того хранилища, куда харвестер реально может
-    // сдать энергию, — до ближайшего с местом. Если свободного места нет
-    // нигде, берём ближайшее хранилище вообще.
+    // Замер идёт до **слива** — того хранилища, в которое уходит основная
+    // масса энергии, то есть с наибольшим свободным местом.
     //
-    // Разница существенная: в E34S53 спавн и расширения у источника забиты
-    // под завязку, и единственное свободное место — у расширений на другом
-    // конце коридора. Харвестер идёт туда за восемь-девять клеток, чтобы
-    // сдать пятьдесят энергии, и вот это и ограничивает доход комнаты.
+    // Раньше замер шёл до ближайшего хранилища, у которого нашлось хоть
+    // немного свободного места. В E34S53 это было пустое расширение (20,25)
+    // в шаге от клетки добычи: замер показывал «доставка короткая» (1), и
+    // стадия починки доставки никогда не включалась — хотя харвестеры
+    // ходили со своим грузом через полкомнаты, потому что всё остальное
+    // хранилище было забито.
     const withRoom = storages.filter(
         (s) => s.store.getFreeCapacity(RESOURCE_ENERGY) > 0
     );
     const pool = withRoom.length > 0 ? withRoom : storages;
 
-    const goals = pool.map((s) => ({ pos: s.pos, range: 1 }));
+    let sink = pool[0] as AnyStoreStructure;
+
+    for (const candidate of pool) {
+        if (
+            candidate.store.getFreeCapacity(RESOURCE_ENERGY) >
+            sink.store.getFreeCapacity(RESOURCE_ENERGY)
+        ) {
+            sink = candidate;
+        }
+    }
+
+    const goals = [{ pos: sink.pos, range: 1 }];
     let total = 0;
     let counted = 0;
 
@@ -2383,8 +2457,14 @@ function measureDeliveryDistanceUnsafe(room: Room): number {
         try {
             const path = PathFinder.search(new RoomPosition(x, y, room.name), goals);
 
-            if (path) {
-                total += path.path.length;
+            if (path && path.path) {
+                // Частичный путь — до цели не дойти: крип упрётся в стену
+                // или в собственную постройку. Такой «доступ» стоит дороже
+                // любого конечного расстояния, поэтому считаем его как
+                // недостижимый.
+                const partial = (path as PathFinderPath & { partial?: boolean }).partial;
+
+                total += partial ? UNREACHABLE_DELIVERY_DISTANCE : path.path.length;
                 counted++;
             }
         } catch {
@@ -2731,6 +2811,182 @@ export function findUpgradeSpot(room: Room, creep: Creep): RoomPosition | null {
     });
 
     return candidates[0] ?? null;
+}
+
+/**
+ * Проверяет, что клетка занята не под крипа: клетки добычи принадлежат
+ * харвестерам, клетки рождения — спавну.
+ *
+ * @param room Комната.
+ * @param x    X клетки.
+ * @param y    Y клетки.
+ * @returns `true`, если на клетке нельзя стоять рабочему крипу.
+ */
+export function isReservedTile(room: Room, x: number, y: number): boolean {
+    if (blocksBirthRing(room, x, y)) {
+        return true;
+    }
+
+    return collectHarvestSlotKeys(room).has(`${x},${y}`);
+}
+
+/**
+ * Апгрейдит контроллер «здесь и сейчас», если крип уже в зоне апгрейда.
+ *
+ * @remarks
+ * Апгрейд работает с расстояния 3 (`upgradeController` проверяет
+ * `inRangeTo(pos, 3)`), поэтому идти ради апгрейда в другую часть комнаты
+ * незачем. Раньше крип шёл к заранее выбранной клетке и апгрейдил
+ * контроллер только после того, как до неё добрался. В E34S53 клетка
+ * оказывалась в пятнадцати шагах по пути, крип туда не доходил — и
+ * контроллер не получал ни единицы прогресса, хотя энергия у крипа была.
+ *
+ * На клетке добычи апгрейдить нельзя: она принадлежит харвестерам, и
+ * занять её — значит отнять у комнаты треть дохода.
+ *
+ * Клетка рождения — другое дело: там апгрейд разрешён. Кольцом рождения
+ * занимается отдельная проверка в `room.ts`, которая сдвигает крипов с
+ * кольца, когда это возможно; запрещать апгрейд из-за клетки нельзя — иначе
+ * запертый крип просто не работает.
+ *
+ * @param creep Крип-апгрейдер.
+ * @returns `true`, если контроллер был апгрейднут.
+ */
+export function tryUpgradeInPlace(creep: Creep): boolean {
+    const controller = creep.room.controller;
+
+    if (!controller || !controller.my) {
+        return false;
+    }
+
+    // Расстояние считаем сами (шквал Хеви): движок проверяет ровно это же
+    // условие в `upgradeController`, а считать его явно позволяет работать
+    // и оффлайн-тестам, где у позиции нет метода `inRangeTo`.
+    const dx = Math.abs(creep.pos.x - controller.pos.x);
+    const dy = Math.abs(creep.pos.y - controller.pos.y);
+
+    if (Math.max(dx, dy) > UPGRADE_RANGE) {
+        return false;
+    }
+
+    if (collectHarvestSlotKeys(creep.room).has(`${creep.pos.x},${creep.pos.y}`)) {
+        // Клетка добычи принадлежит харвестерам: с неё апгрейд лучше не
+        // вести, крип должен уйти на клетку апгрейда. Но если уйти нечем
+        // (усталость, тупик), надо работать здесь: контроллер без
+        // прогресса хуже, чем харвестер, который подождёт пару тиков.
+        //
+        // Без этого запасного пути в тесной комнате апгрейдер застревал
+        // на клетке добычи: он не мог ни уйти, ни качать контроллер, а
+        // харвестер, чья это клетка, не мог копать. В E34S53 контроллер
+        // стоял десятки тиков подряд.
+        if (creep.fatigue <= 0) {
+            return false;
+        }
+    }
+
+    return creep.upgradeController(controller) === OK;
+}
+
+/**
+ * Возвращает клетку, с которой крипу удобно апгрейдить контроллер, и
+ * запоминает её, чтобы не искать заново каждый тик.
+ *
+ * @param creep Крип-апгрейдер.
+ * @returns Клетка для апгрейда или `null`, если подходящей нет.
+ */
+export function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
+    const room = creep.room;
+    const cached = creep.memory._upgradeSpot;
+
+    if (
+        cached &&
+        cached.roomName === room.name &&
+        creep.memory._upgradeSpotVersion === UPGRADE_SPOT_VERSION
+    ) {
+        const built =
+            room.find(FIND_STRUCTURES, {
+                filter: (s) => s.pos.x === cached.x && s.pos.y === cached.y
+            }).length > 0 ||
+            room.find(FIND_CONSTRUCTION_SITES, {
+                filter: (s) => s.pos.x === cached.x && s.pos.y === cached.y
+            }).length > 0;
+
+        // Кэш живёт дольше одного вызова: за это время клетку могли занять
+        // другой крип, построить на ней расширение или закрыть стройкой.
+        // Проверяем все три случая — иначе апгрейдер ходил бы в
+        // недостижимую клетку, не апгрейдя контроллер.
+        //
+        // Занятый живым крипом кэш НЕ обнуляем: крип подвижен, клетка
+        // освободится, а обнуление кэша означало бы пересчёт клетки
+        // апгрейда каждый тик (PathFinder стоит CPU, а клетка всё равно
+        // та же самая).
+        if (!built && !isReservedTile(room, cached.x, cached.y)) {
+            return new RoomPosition(cached.x, cached.y, cached.roomName);
+        }
+    }
+
+    const spot = findUpgradeSpot(room, creep);
+
+    if (spot) {
+        creep.memory._upgradeSpot = { x: spot.x, y: spot.y, roomName: spot.roomName };
+        creep.memory._upgradeSpotVersion = UPGRADE_SPOT_VERSION;
+    } else {
+        delete creep.memory._upgradeSpot;
+        delete creep.memory._upgradeSpotVersion;
+    }
+
+    return spot;
+}
+
+/**
+ * Апгрейдит контроллер, не застревая на кольце рождения.
+ *
+ * @remarks
+ * Общий порядок для всех рабочих крипов, которые качают контроллер:
+ *
+ * 1. если крип стоит на занятой клетке (кольцо рождения или клетка добычи) и
+ *    у него есть выбранная клетка апгрейда — он уходит на неё;
+ * 2. если крип уже в зоне апгрейда (расстояние 3) — апгрейдит на месте;
+ * 3. иначе — идёт на выбранную клетку;
+ * 4. если клетки нет — идёт к контроллеру как есть.
+ *
+ * Пункт 1 — самый важный. Кольцо рождения вокруг спавна в E34S53 было
+ * единственным коротким коридором между клетками добычи и спавном, и
+ * рабочий крип, стоявший на кольце, перекрывал его: крипы — препятствия
+ * для движения, поэтому харвестер с полным рюкзаком обходил полкомнаты
+ * через болото, и доход комнаты был 0.64 энергии в тик при потолке в 6.
+ *
+ * @param creep Крип-рабочий.
+ * @param opts  Опции `MoveToOpts`.
+ * @returns Код действия.
+ */
+export function upgradeFromWorkSpot(creep: Creep, opts?: MoveToOpts): ScreepsReturnCode {
+    const spot = ensureUpgradeSpot(creep);
+
+    if (
+        spot &&
+        !creep.pos.isEqualTo(spot) &&
+        isReservedTile(creep.room, creep.pos.x, creep.pos.y)
+    ) {
+        const result = moveCached(creep, spot, opts);
+
+        if (result === OK || result === ERR_TIRED) {
+            return result;
+        }
+
+        // Пути нет — работаем на месте: контроллер без прогресса хуже,
+        // чем лишний шаг.
+    }
+
+    if (tryUpgradeInPlace(creep)) {
+        return OK;
+    }
+
+    if (spot && !creep.pos.isEqualTo(spot)) {
+        return moveCached(creep, spot, opts);
+    }
+
+    return upgradeRoomController(creep, opts);
 }
 
 /**
