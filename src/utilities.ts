@@ -2648,6 +2648,40 @@ function findClosestCandidateByPath(
  *              считается занятой).
  * @returns Клетка для апгрейда или `null`, если подходящих клеток нет.
  */
+/**
+ * Приоритет роли по клетке работы у контроллера.
+ *
+ * @remarks
+ * Клетка апгрейда — ограниченный ресурс: в тесной комнате вокруг
+ * контроллера пригодная клетка может быть одна, и встать на неё может
+ * только один крип. Кому она принадлежит — вопрос приоритета:
+ *
+ * - `upgrader` (2 WORK) даёт с этой клетки 2 единицы прогресса в тик;
+ * - `builder` (1 WORK) — одну.
+ *
+ * В E34S53 клетка (20,21) — единственная пригодная клетка апгрейда в
+ * «кармане» источника. Билдер, которому нечего строить, вставал на неё
+ * без энергии: апгрейдер не мог на неё встать (крип — препятствие для
+ * движения), оставался в стороне от контроллера, и клетка не получала
+ * прогресса вовсе.
+ *
+ * @param creep Крип-претендент на клетку.
+ * @returns Приоритет: чем больше, тем важнее претендент.
+ */
+function upgradeSpotPriority(creep: Creep | undefined): number {
+    const role = creep?.memory.role;
+
+    if (role === ROLE.UPGRADER) {
+        return 2;
+    }
+
+    if (role === ROLE.BUILDER) {
+        return 1;
+    }
+
+    return 0;
+}
+
 export function findUpgradeSpot(room: Room, creep: Creep): RoomPosition | null {
     const controller = room.controller;
 
@@ -2682,6 +2716,39 @@ export function findUpgradeSpot(room: Room, creep: Creep): RoomPosition | null {
     for (const source of room.find(FIND_SOURCES)) {
         for (const slot of collectHarvestSlots(room, source)) {
             blocked.add(`${slot.x},${slot.y}`);
+        }
+    }
+
+    // Клетка апгрейда — ресурс ограниченный: вокруг контроллера в тесной
+    // комнате пригодная клетка может быть одна, и встать на неё можно
+    // только одному. Поэтому клетка, занятая нашим рабочим, в кандидаты не
+    // попадает: занятую клетку нельзя занять (движок считает крипов
+    // препятствием), и рабочий окажется заблокирован навсегда.
+    //
+    // Отбирать клетку можно только у того, у кого приоритет ниже (см.
+    // `upgradeSpotPriority`): он её освободит сам. В E34S53 клетка (20,21) —
+    // единственная пригодная клетка апгрейда рядом с источником, и билдер,
+    // которому нечего строить, занимал её без энергии, блокируя апгрейдера.
+    const claims = room.memory._upgradeSpots ?? {};
+    const myPriority = upgradeSpotPriority(creep);
+
+    for (const other of room.find(FIND_MY_CREEPS)) {
+        if (other.name === creep.name) {
+            continue;
+        }
+
+        const key = `${other.pos.x},${other.pos.y}`;
+        const holder = claims[key];
+
+        if (holder === undefined) {
+            // Клетку никто не занимает по договорённости — она просто занята
+            // живым крипом (проход, клетка добычи). Отбирать её нельзя.
+            blocked.add(key);
+            continue;
+        }
+
+        if (holder !== creep.name && upgradeSpotPriority(Game.creeps[holder]) >= myPriority) {
+            blocked.add(key);
         }
     }
 
@@ -2896,6 +2963,17 @@ export function tryUpgradeInPlace(creep: Creep): boolean {
  */
 export function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
     const room = creep.room;
+    const claims = (room.memory._upgradeSpots ??= {});
+
+    // Притязания мёртвых крипов больше не действуют.
+    for (const key in claims) {
+        const owner = claims[key];
+
+        if (owner === undefined || !Game.creeps[owner]) {
+            delete claims[key];
+        }
+    }
+
     const cached = creep.memory._upgradeSpot;
 
     if (
@@ -2920,7 +2998,22 @@ export function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
         // освободится, а обнуление кэша означало бы пересчёт клетки
         // апгрейда каждый тик (PathFinder стоит CPU, а клетка всё равно
         // та же самая).
-        if (!built && !isReservedTile(room, cached.x, cached.y)) {
+        //
+        // Исключение — клетка, закреплённая за крипом с приоритетом не ниже
+        // нашего: это не «проход», а рабочее место, и отдать его можно
+        // только тому, у кого приоритет выше (см. `upgradeSpotPriority`).
+        // В E34S53 билдер держал единственную клетку апгрейда у источника
+        // и блокировал апгрейдера: крипы — препятствия для движения, и
+        // апгрейдер физически не мог на неё встать.
+        const key = `${cached.x},${cached.y}`;
+        const holder = claims[key];
+        const contested =
+            holder !== undefined &&
+            holder !== creep.name &&
+            upgradeSpotPriority(Game.creeps[holder]) >= upgradeSpotPriority(creep);
+
+        if (!built && !isReservedTile(room, cached.x, cached.y) && !contested) {
+            claims[key] = creep.name;
             return new RoomPosition(cached.x, cached.y, cached.roomName);
         }
     }
@@ -2928,6 +3021,7 @@ export function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
     const spot = findUpgradeSpot(room, creep);
 
     if (spot) {
+        claims[`${spot.x},${spot.y}`] = creep.name;
         creep.memory._upgradeSpot = { x: spot.x, y: spot.y, roomName: spot.roomName };
         creep.memory._upgradeSpotVersion = UPGRADE_SPOT_VERSION;
     } else {
