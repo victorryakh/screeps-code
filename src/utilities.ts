@@ -2732,6 +2732,24 @@ export function findUpgradeSpot(room: Room, creep: Creep): RoomPosition | null {
     const claims = room.memory._upgradeSpots ?? {};
     const myPriority = upgradeSpotPriority(creep);
 
+    // Клетки, закреплённые за другими рабочими. Важно проверять именно
+    // карту притязаний, а не только клетки, на которых кто-то стоит:
+    // рабочее место может быть свободно (претендент ещё не дошёл), и
+    // тогда второй рабочий выбрал бы ту же клетку — и снова заблокировал
+    // её. В E34S53 клетку (20,21) держал билдер, а апгрейдер стоял в
+    // (19,20) и физически не мог на неё встать.
+    for (const key in claims) {
+        const owner = claims[key];
+
+        if (owner === undefined || owner === creep.name) {
+            continue;
+        }
+
+        if (upgradeSpotPriority(Game.creeps[owner]) >= myPriority) {
+            blocked.add(key);
+        }
+    }
+
     for (const other of room.find(FIND_MY_CREEPS)) {
         if (other.name === creep.name) {
             continue;

@@ -480,6 +480,42 @@ function runTicks(sim, n) {
         JSON.stringify(upgrader.memory._upgradeSpot));
 }
 
+// --- Scenario 1b: the builder yields even before the upgrader arrives ----
+//
+// The upgrader cannot step onto (20,21) while the builder is standing
+// there. So for a few ticks the cell is claimed by the upgrader but
+// physically occupied by the builder. The builder must not re-select that
+// same cell - it is the deadlock the live colony was in.
+{
+    const sim = makeRoom({ extensions: LIVE.extensions, creeps: LIVE_WITH_CACHED_SPOT });
+    global.Memory = {};
+
+    // One tick: the upgrader claims (20,21), the builder keeps its cache.
+    runTicks(sim, 1);
+
+    const builder = sim.creeps.find((c) => c.memory.role === 'builder');
+    const upgrader = sim.creeps.find((c) => c.memory.role === 'upgrader');
+
+    check('the upgrader claims the pocket tile',
+        sim.room.memory._upgradeSpots['20,21'] === upgrader.name,
+        JSON.stringify(sim.room.memory._upgradeSpots));
+
+    // The next tick: the builder sees the claim and must move on.
+    runTicks(sim, 1);
+
+    check('the builder does not keep the tile claimed by the upgrader',
+        !builder.memory._upgradeSpot ||
+            builder.memory._upgradeSpot.x !== 20 ||
+            builder.memory._upgradeSpot.y !== 21,
+        `builder spot=${JSON.stringify(builder.memory._upgradeSpot)}`);
+    check('the builder walks away from the pocket',
+        builder.pos.x !== 20 || builder.pos.y !== 21,
+        `builder at ${builder.pos.x},${builder.pos.y}`);
+    check('the upgrader still owns the pocket tile',
+        sim.room.memory._upgradeSpots['20,21'] === upgrader.name,
+        JSON.stringify(sim.room.memory._upgradeSpots));
+}
+
 // --- Scenario 2: the upgrader works instead of standing with a full bag ---
 {
     const sim = makeRoom({ extensions: LIVE.extensions, creeps: LIVE_WITH_CACHED_SPOT });
