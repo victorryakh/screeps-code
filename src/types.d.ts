@@ -169,6 +169,12 @@ declare global {
         _ringReserveCheckTick?: number;
         /** Тик последней проверки наличия выхода из кольца рождения (см. `ensureBirthExit`). */
         _birthExitCheckTick?: number;
+        /** Тик последней проверки, растёт ли прогресс контроллера (см. `watchControllerProgress`). */
+        _controllerWatchTick?: number;
+        /** Последний замеченный прогресс контроллера комнаты. */
+        _lastControllerProgress?: number;
+        /** Тик, на котором прогресс контроллера последний раз вырос. */
+        _lastControllerProgressTick?: number;
         /** Тик последней проверки запертых крипов (см. `ensureCreepsNotConfined`). */
         _confinedCheckTick?: number;
         /** Диагностический снимок состояния кольца клеток рождения (пишется, когда кольцо тесное). */

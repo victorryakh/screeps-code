@@ -29,6 +29,29 @@ import {
     upgradeFromWorkSpot,
     runStepAside
 } from '../utilities';
+import * as log from '../log';
+
+/**
+ * Добывает энергию из источника комнаты.
+ *
+ * @remarks
+ * Запасной путь для рабочего, которому не досталось энергии из структур.
+ * Источник всегда под рукой, и одна клетка добычи, занятая рабочим, — это
+ * меньшая потеря, чем контроллер, который не растёт.
+ *
+ * @param creep Крип-рабочий.
+ */
+function harvestFromSource(creep: Creep): void {
+    const source = findClosestSource(creep);
+
+    if (!source) {
+        return;
+    }
+
+    harvestEnergy(creep, source, {
+        visualizePathStyle: { stroke: '#ffaa00' }
+    });
+}
 
 /**
  * Режим «источник насыщен»: энергия берётся из спавна/расширений.
@@ -60,12 +83,38 @@ function runDonorMode(creep: Creep): void {
         const donor = findEnergyDonor(creep);
 
         if (!donor) {
+            // Доноров нет: ни в одной структуре комнаты энергии нет.
+            //
+            // Молчать здесь нельзя: апгрейдер без энергии не апгрейдит
+            // контроллер, а контроллер без прогресса — это медленный
+            // даунгрейд комнаты. В E34S53 апгрейдер остался без энергии на
+            // клетке спавна, и контроллер простоял сотни тиков без единого
+            // сообщения. Источник всегда под рукой: добываем сами, пусть даже
+            // заняв одну клетку добычи у харвестера.
+            log.warn(
+                'upgrader',
+                `no energy donor in ${creep.room.name} — the upgrader harvests the source itself`
+            );
+
+            harvestFromSource(creep);
+
             return;
         }
 
-        withdrawEnergy(creep, donor, {
+        const result = withdrawEnergy(creep, donor, {
             visualizePathStyle: { stroke: '#ffaa00' }
         });
+
+        if (result === ERR_NO_PATH) {
+            // К донору не пройти: коридор заперт (крипы — препятствия для
+            // движения). Стоять тут бессмысленно — берём энергию из источника.
+            log.warn(
+                'upgrader',
+                `no path to the energy donor in ${creep.room.name} — the upgrader harvests the source itself`
+            );
+
+            harvestFromSource(creep);
+        }
 
         return;
     }

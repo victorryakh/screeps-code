@@ -29,7 +29,9 @@ import {
     DELIVERY_STRUCTURE_CHECK_INTERVAL,
     BUILDER_RESERVE_ENERGY,
     BUILDER_TRIP_ENERGY,
-    DELIVERY_BUILD_HORIZON_TICKS
+    DELIVERY_BUILD_HORIZON_TICKS,
+    CONTROLLER_STALL_TICKS,
+    CONTROLLER_WATCH_INTERVAL
 } from './constants';
 import { trySpawn } from './spawn';
 import {
@@ -126,6 +128,7 @@ export function run(room: Room): void {
     ensureCreepsNotBlocking(room);
     updateSourceSaturation(room, counts);
     updateIncomeRate(room);
+    watchControllerProgress(room);
 
     const defense = planDefense(room);
     if (defense.enabled) {
@@ -1377,6 +1380,63 @@ function updateIncomeRate(room: Room): void {
         room.memory._harvested = 0;
         room.memory._incomeWindowTick = now;
     }
+}
+
+/**
+ * Следит за прогрессом контроллера: если прогресс не растёт дольше
+ * {@link CONTROLLER_STALL_TICKS}, бот об этом сообщает.
+ *
+ * @remarks
+ * Контроллер без апгрейдера — самая дорогая поломка колонии, и единственная,
+ * которая не выглядит поломкой: тики идут, ошибок нет, структуры на месте —
+ * а комната медленно теряет уровень, и вместе с ним расширения, башни и запас
+ * прочности. В E34S53 апгрейдер остался без энергии (донор был недостижим),
+ * и контроллер простоял без прогресса сотни тиков — бот не сообщил об этом
+ * ни слова, и по логам комната выглядела живой.
+ *
+ * Проверка идёт раз в {@link CONTROLLER_WATCH_INTERVAL} тиков: чаще — расточительно
+ * по CPU, реже — авария может длиться дольше, чем заметят.
+ *
+ * @param room Комната.
+ */
+function watchControllerProgress(room: Room): void {
+    if (
+        room.memory._controllerWatchTick &&
+        Game.time - room.memory._controllerWatchTick < CONTROLLER_WATCH_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._controllerWatchTick = Game.time;
+
+    const controller = room.controller;
+
+    if (!controller) {
+        return;
+    }
+
+    const progress = controller.progress;
+    const last = room.memory._lastControllerProgress;
+
+    if (last === undefined || progress > last) {
+        room.memory._lastControllerProgress = progress;
+        room.memory._lastControllerProgressTick = Game.time;
+        return;
+    }
+
+    const stalled =
+        Game.time - (room.memory._lastControllerProgressTick ?? Game.time);
+
+    if (stalled < CONTROLLER_STALL_TICKS) {
+        return;
+    }
+
+    log.warn(
+        'room',
+        `controller of ${room.name} has not progressed for ${stalled} ticks ` +
+        `(progress ${progress}, downgrade in ${controller.ticksToDowngrade} ticks) — ` +
+        'the upgrader is probably stuck without energy'
+    );
 }
 
 /**
