@@ -655,6 +655,51 @@ export function upgradeRoomController(creep: Creep, opts?: MoveToOpts): ScreepsR
 }
 
 /**
+ * Качает контроллер комнаты, если крип уже находится в зоне апгрейда.
+ *
+ * @remarks
+ * Движок разрешает апгрейдить контроллер с расстояния 3
+ * (`processor/intents/creeps/upgradeController.js`:
+ * `if(Math.abs(target.x - object.x) > 3 || Math.abs(target.y - object.y) > 3) return;`),
+ * поэтому крип может качать контроллер, не подходя к нему вплотную.
+ *
+ * **В одном тике крип может и добывать, и качать контроллер.**
+ * `processor/intents/creeps/intents.js` не ставит между `harvest` и
+ * `upgradeController` взаимного приоритета: `harvest` исполняется первым и
+ * сразу увеличивает `creep.store`, а `upgradeController` — позже и тратит
+ * уже обновлённый запас. Источник даёт `2` энергии за тик на часть WORK, а
+ * апгрейд забирает `1` — значит крип на клетке добычи может качать
+ * контроллер, не сходя с неё и не сдавая энергию в структуры.
+ *
+ * Для комнаты, где до RCL 6 нужны сотни тысяч единиц прогресса, это
+ * единственный способ превратить добычу в прогресс без затрат на дорогу:
+ * энергия, сданная в структуру, потом ещё раз едет к контроллеру — уже
+ * силами другого крипа.
+ *
+ * @param creep Крип.
+ * @returns `true`, если интент апгрейда выставлен.
+ */
+export function upgradeControllerInPlace(creep: Creep): boolean {
+    const controller = creep.room.controller;
+
+    if (!controller || !controller.my) {
+        return false;
+    }
+
+    // Расстояние считаем сами (шквал Хеви): движок проверяет ровно это же
+    // условие в `upgradeController`, а считать его явно позволяет работать
+    // и оффлайн-тестам, где у позиции нет метода `inRangeTo`.
+    const dx = Math.abs(creep.pos.x - controller.pos.x);
+    const dy = Math.abs(creep.pos.y - controller.pos.y);
+
+    if (Math.max(dx, dy) > UPGRADE_RANGE) {
+        return false;
+    }
+
+    return creep.upgradeController(controller) === OK;
+}
+
+/**
  * Возвращает ближайший к крипу свой construction site, удовлетворяющий
  * фильтру. По умолчанию выбираются любые недостроенные сайты.
  *
