@@ -297,8 +297,11 @@ function makeRoom(opts) {
         store: makeStore(opts.spawnEnergy === undefined ? 300 : opts.spawnEnergy, 300),
         spawning: null, room: null,
         spawnCreep(body, name, opts) {
-            const cost = body.reduce((sum, part) => sum + ({ move: 50, work: 100, carry: 50 }[part] || 0), 0);
-            if (room.energyAvailable < cost) {
+            const cost = body.reduce((sum, part) => sum + (BODYPART_COST[part] || 0), 0);
+            // The engine draws the energy from the SPAWN's own store, not
+            // from the room: the spawn holds at most 300 energy, so a body
+            // that costs more can never be created.
+            if (spawn.store.energy < cost) {
                 return -6; // ERR_NOT_ENOUGH_ENERGY
             }
             spawnAttempts.push({ name, role: opts && opts.memory ? opts.memory.role : '?', cost, body: body.slice() });
@@ -991,9 +994,15 @@ function actions(creep, kind) {
 // half of its life in fatigue. The upgrader walks to its donor and back, so
 // on swamp it spent more time walking than upgrading - and the controller
 // stood still for dozens of ticks at a time.
+// --- Scenario 17: every body fits the spawn's energy capacity -------------
+// `spawnCreep` draws the energy from the SPAWN itself, and the spawn's
+// store holds 300 energy. A body that costs more than that can never be
+// created, no matter how much energy the room has.
+//
+// The upgrader used to be [WORK, WORK, CARRY, MOVE, MOVE] = 350: it could
+// never be spawned, in any room, ever - and the colony ran for days on
+// harvesters doubling as upgraders, with no income in the structures.
 {
-    // The room is RCL 3 with three harvesters already, so the bot spawns an
-    // upgrader and the attempt records its body.
     const sim = makeRoom({
         creeps: [[20, 22, 'harvester', 0], [20, 23, 'harvester', 0], [20, 24, 'harvester', 0]],
         spawnEnergy: 400
@@ -1003,10 +1012,45 @@ function actions(creep, kind) {
 
     const attempt = sim.spawnAttempts.find((a) => a.role === 'upgrader');
     const body = attempt ? attempt.body : [];
+    const cost = body.reduce((sum, part) => sum + (BODYPART_COST[part] || 0), 0);
 
-    check('the upgrader has two MOVE parts from RCL 2 on',
-        body.filter((p) => p === 'move').length === 2,
+    check('the upgrader body fits the spawn capacity (300 energy)',
+        body.length > 0 && cost <= SPAWN_ENERGY_CAPACITY,
+        JSON.stringify({ body, cost }));
+
+    check('the upgrader still carries two WORK parts',
+        body.filter((p) => p === 'work').length === 2,
         JSON.stringify(body));
+}
+
+// --- Scenario 19: the harvester delivers before the room is broke -------
+// The harvester upgrades the controller in place, and the upgrade eats one
+// energy per tick while the harvest gives two. So the backpack grows by one
+// energy per tick and the delivery condition "the backpack holds at least
+// the trip load" is never true: the backpack sits exactly one energy below
+// it, forever.
+//
+// In E34S53 the three harvesters stood at 99 of 100 for days, the source
+// drained normally, and the spawn and extensions never changed by a single
+// point. The room had no income, could not pay for a replacement creep, and
+// was one creep death away from being dead for good.
+{
+    const sim = makeRoom({
+        creeps: [[20, 23, 'harvester', 60]],
+        spawnEnergy: 100
+    });
+
+    runTicks(sim, 1);
+
+    const creep = sim.creeps.find((c) => c.memory.role === 'harvester');
+    const acts = creep.actions || [];
+    const transferred = acts.some((a) => a[0] === 'transfer');
+    const harvested = acts.some((a) => a[0] === 'harvest');
+
+    check('a harvester with a half-full backpack goes to deliver',
+        transferred, JSON.stringify(acts));
+    check('a harvester with a half-full backpack stops digging',
+        !harvested, JSON.stringify(acts));
 }
 
 // --- Scenario 18: the movement does not pretend to ignore creeps ----------

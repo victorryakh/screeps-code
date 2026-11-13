@@ -10,6 +10,7 @@ import { ROLE } from './constants';
 import { REMOTE_ROLES } from './strategy';
 import { bodyFor, bodyCost } from './utilities';
 import { recordSpawn } from './metrics';
+import * as log from './log';
 
 /**
  * Пытается создать крипа заданной роли в комнате. Алгоритм:
@@ -50,7 +51,30 @@ export function trySpawn(room: Room, role: string): boolean {
         return false;
     }
 
-    if (spawn.room.energyAvailable < bodyCost(body)) {
+    const cost = bodyCost(body);
+
+    // `spawnCreep` берёт энергию **из спавна**, а не из комнаты: ёмкость
+    // хранилища спавна — 300 энергий. Поэтому проверять надо запас спавна,
+    // а не `room.energyAvailable` (спавн + расширения).
+    //
+    // Прежняя проверка по комнате создавала иллюзию, что крипа можно
+    // заказать: в E34S53 в комнате было 327 энергии, а апгрейдер стоил
+    // 350 — и бот сутки подряд пытался заказать апгрейдера, которого
+    // невозможно было создать ни при каком запасе. Тело дороже ёмкости
+    // спавна не создаётся вообще никогда.
+    if (spawn.store.energy < cost) {
+        // Энергия в комнате есть, но она лежит в расширениях, а спавн
+        // их не видит. Это не «нет денег», это «деньги не там» — и
+        // сообщить об этом стоит, иначе комната выглядит платёжеспособной.
+        if (spawn.room.energyAvailable >= cost) {
+            log.warn(
+                'spawn',
+                `cannot spawn ${role} in ${room.name}: the spawn holds only ` +
+                `${spawn.store.energy} of ${cost} energy — the rest sits in ` +
+                'extensions, and spawnCreep only draws from the spawn itself'
+            );
+        }
+
         return false;
     }
 
