@@ -9,6 +9,7 @@ import {
     HARVEST_RATE_PER_WORK,
     DELIVERY_TARGET_TTL,
     DELIVERY_FATIGUE_FACTOR,
+    SPAWN_FEED_PRIORITY,
     UNREACHABLE_DELIVERY_DISTANCE,
     CONFINED_REGION_MIN_GROWTH,
     STEP_ASIDE_RADIUS,
@@ -518,7 +519,26 @@ export function findEnergyTransferTarget(
         // харвестер, который повезёт 50 энергии в расширение на 50 мест,
         // платит за дорогу как за 50, а не за 100.
         const walkCost = distance * (1 + tripLoad) * DELIVERY_FATIGUE_FACTOR;
-        const rate = tripLoad / (tripLoad / harvestRate + walkCost);
+        let rate = tripLoad / (tripLoad / harvestRate + walkCost);
+
+        // Спавн — единственное место, откуда в комнате берутся крипы, а
+        // крипы умирают от старости каждые 1500 тиков. Если спавн не
+        // накормлен, кормить надо его, даже если рядом есть расширение
+        // с местом: энергия в расширении не превращается ни в одного
+        // крипа, а в спавне превращается.
+        //
+        // Без этого правила харвестеры выбирали «выгодное» по скорости
+        // хранилище — дальнее расширение, — спавн оставался на 226
+        // энергиях из 300, и апгрейдер (тело ровно 300) не мог появиться
+        // никогда: `spawnCreep` берёт энергию из спавна, а не из комнаты.
+        const needsFeed =
+            candidate.structureType === STRUCTURE_SPAWN &&
+            candidate.store.energy <
+                (candidate.store.getCapacity?.(RESOURCE_ENERGY) ?? 0);
+
+        if (needsFeed) {
+            rate *= SPAWN_FEED_PRIORITY;
+        }
 
         if (rate > bestRate || (rate === bestRate && distance < bestDistance)) {
             best = candidate;
