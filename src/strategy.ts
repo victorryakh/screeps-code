@@ -358,7 +358,11 @@ export function planBaseLayout(
 export const EXPANSION = {
     reserverBody: [CLAIM, CLAIM, MOVE, MOVE] as BodyPartConstant[],
     claimerBody: [CLAIM, MOVE, MOVE, MOVE] as BodyPartConstant[],
-    rharvesterBody: [WORK, WORK, CARRY, MOVE, MOVE] as BodyPartConstant[],
+    // Тело удалённого харвестера обязано влезать в спавн: `spawnCreep`
+    // берёт энергию из спавна, а ёмкость его хранилища — 300.
+    // [WORK, WORK, CARRY, MOVE, MOVE] = 350 — такое тело не создаётся
+    // никогда, сколько бы энергии ни стояло в расширениях.
+    rharvesterBody: [WORK, WORK, CARRY, MOVE] as BodyPartConstant[],
     reserverCount: 1,
     claimerCount: 1,
     rharvesterCount: 2,

@@ -71,10 +71,26 @@ function isBuildable(site: ConstructionSite): boolean {
  * (доставка энергии сокращается с десяти клеток до одной), поэтому такие
  * площадки билдер строит первыми. Остальные — по ближайшей.
  *
+ * **Исключение — башня обороны.** Она стоит в первом ряду всегда:
+ * - вторгатели бьют по харвестерам, и без башни колония вымирает. В E34S53
+ *   14.11.2026 они оставили комнату с одним билдером — и комната перестала
+ *   производить энергию вовсе;
+ * - башня обходится дешевле контейнера (1000 против 5000), а контейнер — это
+ *   «дырка» для излишка, то есть оптимизация дохода, а не выживание.
+ *
  * @param creep Крип-билдер.
  * @returns Площадка или `null`, если строить нечего.
  */
 function findSiteToBuild(creep: Creep): ConstructionSite | null {
+    const tower = findConstructionSite(
+        creep,
+        (s) => isBuildable(s) && s.structureType === STRUCTURE_TOWER
+    );
+
+    if (tower) {
+        return tower;
+    }
+
     return findDeliverySite(creep, isBuildable) ?? findConstructionSite(creep, isBuildable);
 }
 

@@ -9,6 +9,9 @@ import {
     HARVEST_RATE_PER_WORK,
     DELIVERY_TARGET_TTL,
     DELIVERY_FATIGUE_FACTOR,
+    SPAWN_FEED_PRIORITY,
+    SPAWN_RESERVE_ENERGY,
+    RESCUE_HARVESTER_BODIES,
     UNREACHABLE_DELIVERY_DISTANCE,
     CONFINED_REGION_MIN_GROWTH,
     STEP_ASIDE_RADIUS,
@@ -143,12 +146,21 @@ export function bodyCost(body: BodyPartConstant[]): number {
  * Возвращает массив частей тела по имени роли. Базовые роли хардкоднуты,
  * удалённые (`RHARVESTER`, `RESERVER`, `CLAIMER`) берутся из {@link EXPANSION}.
  *
+ * @remarks
+ * Уровень контроллера в выборе тела **не участвует**: ёмкость хранилища
+ * спавна — 300 энергий при любом RCL (`SPAWN_ENERGY_CAPACITY`), а
+ * `spawnCreep` берёт энергию из одного спавна. Поэтому тело дороже 300 не
+ * создаётся никогда, и апгрейдер не может быть больше 300 энергий ни в RCL 1,
+ * ни в RCL 8. Раньше здесь был параметр `rcl`, и тело апгрейдера зависело от
+ * него: с RCL 2 — 350 энергий, то есть тело, которое нельзя создать ни при
+ * каком запасе энергии в комнате.
+ *
  * @param role Имя роли. Лучше передавать значения из {@link ROLE}, но тип
  *             расширен до `string` ради совместимости с устаревшими данными
  *             в `Memory.creeps`. Для неизвестной роли возвращается
  *             минимальное тело `[WORK, CARRY, MOVE]`.
  */
-export function bodyFor(role: string, rcl: number = 1): BodyPartConstant[] {
+export function bodyFor(role: string): BodyPartConstant[] {
     switch (role) {
         case ROLE.HARVESTER:
             // Тело харвестера подобрано под реальную геометрию комнаты:
@@ -163,19 +175,26 @@ export function bodyFor(role: string, rcl: number = 1): BodyPartConstant[] {
             return [WORK, CARRY, CARRY, MOVE, MOVE];
 
         case ROLE.UPGRADER:
+            // Тело апгрейдера обязано влезать в спавн.
+            //
+            // `spawnCreep` берёт энергию **из спавна**, а не из комнаты:
+            // ёмкость хранилища спавна — 300 энергий. Тело дороже 300
+            // (например, [WORK, WORK, CARRY, MOVE, MOVE] = 350) не может
+            // быть создано НИКОГДА: сколько бы энергии ни стояло в
+            // расширениях, спавн примет максимум 300.
+            //
+            // В E34S53 апгрейдер стоил 350, поэтому в комнате не появился
+            // ни одного апгрейдера — с момента, когда тело поменяли, и до
+            // сих пор. Вместо апгрейдера контроллер качали харвестеры
+            // (см. `upgradeControllerInPlace`), и комната жила на этом,
+            // но без дохода: энергия уходила в контроллер, а не в
+            // структуры.
+            //
             // Второй MOVE нужен на болоте: крип с одним MOVE ползёт по
             // полклетки за тик и половину времени стоит в усталости.
-            // Апгрейдер ходит за энергией к донору и обратно к контроллеру,
-            // и на болоте без второго MOVE он в дороге проводит больше
-            // времени, чем качает контроллер. В E34S53 контроллер из-за
-            // этого простаивал десятки тиков подряд: апгрейдер стоял в
-            // усталости на клетке добычи, а прогресс не капал.
-            //
-            // Но на RCL 1 доступно ровно 300 энергии за спавн (расширений
-            // на RCL 1 ещё нет), и свежая комната не должна остаться без
-            // апгрейдера. Поэтому второй MOVE берём с RCL 2, где лимит
-            // расширений уже позволяет профинансировать тело.
-            return rcl >= 2 ? [WORK, WORK, CARRY, MOVE, MOVE] : [WORK, WORK, CARRY, MOVE];
+            // Но 300 — это потолок спавна, и тело [WORK, WORK, CARRY, MOVE]
+            // (100+100+50+50) в него ровно влезает.
+            return [WORK, WORK, CARRY, MOVE];
 
         case ROLE.BUILDER:
             return [WORK, CARRY, CARRY, MOVE, MOVE];
@@ -195,6 +214,47 @@ export function bodyFor(role: string, rcl: number = 1): BodyPartConstant[] {
         default:
             return [WORK, CARRY, MOVE];
     }
+}
+
+/**
+ * Подбирает уменьшенное тело харвестера, которое влезает в указанный запас
+ * энергии.
+ *
+ * @remarks
+ * Нужно ровно одно место — когда спавн не может оплатить основное тело
+ * (300 энергий), но комната ещё жива. Без такого запасного пути комната
+ * с 250 энергиями в спавне и 400 в расширениях не может заказать ни одного
+ * крипа: `spawnCreep` берёт энергию из самого спавна, а спавн не регенерирует,
+ * пока в комнате больше 300 энергии.
+ *
+ * Тело должно остаться харвестером: с WORK (добыча или снятие энергии со
+ * структуры), с CARRY (рюкзак) и хотя бы с одним MOVE.
+ *
+ * @param role      Имя роли. Спасательное тело умеет только харвестер.
+ * @param available Сколько энергии лежит в спавне.
+ * @returns Тело, которое влезает в запас, или `null`, если не влезает ни одно.
+ */
+export function rescueBodyFor(role: string, available: number): BodyPartConstant[] | null {
+    if (role !== ROLE.HARVESTER) {
+        return null;
+    }
+
+    for (const body of RESCUE_HARVESTER_BODIES) {
+        const cost = bodyCost(body);
+
+        // Тело дешевле резерва не годится: без CARRY энергию не донести до
+        // спавна, без MOVE — не дойти. Первое рабочее тело стоит ровно
+        // столько, сколько спавн обязан держать про запас.
+        if (cost < SPAWN_RESERVE_ENERGY) {
+            continue;
+        }
+
+        if (cost <= available) {
+            return body;
+        }
+    }
+
+    return null;
 }
 
 /**
@@ -412,6 +472,51 @@ export function findEnergyTransferTarget(
         return null;
     }
 
+    // Спавн — единственное место, где энергия комнаты превращается в крипов.
+    //
+    // `spawnCreep` берёт энергию **из самого спавна**: сколько бы её ни лежало
+    // в расширениях, спавн её не увидит. Поэтому, пока в спавне есть свободное
+    // место, сдавать энергию надо туда — иначе она лежит там, куда спавн не
+    // дотягивается.
+    //
+    // Раньше выбор шёл по «скорости доставки», и спавн проигрывал всегда:
+    // расширение в один шаг от клетки добычи даёт rate = 50/(25+51) ≈ 0.66, а
+    // спавн в девяти шагах через болото — 50/(25+9·51) ≈ 0.10, и даже
+    // трёхкратный множитель `SPAWN_FEED_PRIORITY` не дотягивал. В E34S53 спавн
+    // так и стоял на 250 энергиях из 300, а комната копила 400 энергии в
+    // расширениях, до которых спавн не дотягивается: крипов заменить нечем,
+    // и счётчик энергии в комнате от этого не рос.
+    //
+    // Правило жёсткое и проверяется **до** кэша цели и до выбора «ближних»
+    // хранилищ: кэш живёт {@link DELIVERY_TARGET_TTL} тиков, и за это время
+    // харвестер продолжал бы носить энергию в дальнее расширение.
+    //
+    // Но только если до спавна **есть путь**. Площадки расширений и сами
+    // расширения занимают клетки, и кольцо рождения вокруг спавна может быть
+    // перекрыто: тогда путь не находится, спавн помечается недостижимым, и
+    // харвестер пошёл бы к нему в стену. В этом случае действует обычное
+    // правило выбора цели.
+    //
+    // Побочный эффект тот же, что и в движке: спавн регенерирует по 1 энергии
+    // за тик, пока энергии в спавне и расширениях комнаты меньше 300. Пока
+    // энергия лежит в спавне, а не в расширениях, у комнаты остаётся этот
+    // бесплатный подпор — единственный способ починить себя после потери
+    // всех крипов.
+    const spawnCandidate = candidates.find(
+        (c) => c.structureType === STRUCTURE_SPAWN
+    ) as AnyStoreStructure | undefined;
+
+    if (
+        spawnCandidate &&
+        spawnCandidate.store.energy <
+            (spawnCandidate.store.getCapacity?.(RESOURCE_ENERGY) ?? 0) &&
+        deliveryPathDistance(creep, spawnCandidate) >= 0
+    ) {
+        creep.memory._deliveryTarget = { id: spawnCandidate.id, tick: Game.time };
+
+        return spawnCandidate;
+    }
+
     // Хранилище рядом с клеткой добычи — лучший вариант по определению:
     // харвестер сдаёт энергию, не сходя с клетки (один шаг), и, главное,
     // не встаёт на кольцо рождения вокруг спавна.
@@ -511,7 +616,26 @@ export function findEnergyTransferTarget(
         // харвестер, который повезёт 50 энергии в расширение на 50 мест,
         // платит за дорогу как за 50, а не за 100.
         const walkCost = distance * (1 + tripLoad) * DELIVERY_FATIGUE_FACTOR;
-        const rate = tripLoad / (tripLoad / harvestRate + walkCost);
+        let rate = tripLoad / (tripLoad / harvestRate + walkCost);
+
+        // Спавн — единственное место, откуда в комнате берутся крипы, а
+        // крипы умирают от старости каждые 1500 тиков. Если спавн не
+        // накормлен, кормить надо его, даже если рядом есть расширение
+        // с местом: энергия в расширении не превращается ни в одного
+        // крипа, а в спавне превращается.
+        //
+        // Без этого правила харвестеры выбирали «выгодное» по скорости
+        // хранилище — дальнее расширение, — спавн оставался на 226
+        // энергиях из 300, и апгрейдер (тело ровно 300) не мог появиться
+        // никогда: `spawnCreep` берёт энергию из спавна, а не из комнаты.
+        const needsFeed =
+            candidate.structureType === STRUCTURE_SPAWN &&
+            candidate.store.energy <
+                (candidate.store.getCapacity?.(RESOURCE_ENERGY) ?? 0);
+
+        if (needsFeed) {
+            rate *= SPAWN_FEED_PRIORITY;
+        }
 
         if (rate > bestRate || (rate === bestRate && distance < bestDistance)) {
             best = candidate;
@@ -652,6 +776,51 @@ export function upgradeRoomController(creep: Creep, opts?: MoveToOpts): ScreepsR
     }
 
     return OK;
+}
+
+/**
+ * Качает контроллер комнаты, если крип уже находится в зоне апгрейда.
+ *
+ * @remarks
+ * Движок разрешает апгрейдить контроллер с расстояния 3
+ * (`processor/intents/creeps/upgradeController.js`:
+ * `if(Math.abs(target.x - object.x) > 3 || Math.abs(target.y - object.y) > 3) return;`),
+ * поэтому крип может качать контроллер, не подходя к нему вплотную.
+ *
+ * **В одном тике крип может и добывать, и качать контроллер.**
+ * `processor/intents/creeps/intents.js` не ставит между `harvest` и
+ * `upgradeController` взаимного приоритета: `harvest` исполняется первым и
+ * сразу увеличивает `creep.store`, а `upgradeController` — позже и тратит
+ * уже обновлённый запас. Источник даёт `2` энергии за тик на часть WORK, а
+ * апгрейд забирает `1` — значит крип на клетке добычи может качать
+ * контроллер, не сходя с неё и не сдавая энергию в структуры.
+ *
+ * Для комнаты, где до RCL 6 нужны сотни тысяч единиц прогресса, это
+ * единственный способ превратить добычу в прогресс без затрат на дорогу:
+ * энергия, сданная в структуру, потом ещё раз едет к контроллеру — уже
+ * силами другого крипа.
+ *
+ * @param creep Крип.
+ * @returns `true`, если интент апгрейда выставлен.
+ */
+export function upgradeControllerInPlace(creep: Creep): boolean {
+    const controller = creep.room.controller;
+
+    if (!controller || !controller.my) {
+        return false;
+    }
+
+    // Расстояние считаем сами (шквал Хеви): движок проверяет ровно это же
+    // условие в `upgradeController`, а считать его явно позволяет работать
+    // и оффлайн-тестам, где у позиции нет метода `inRangeTo`.
+    const dx = Math.abs(creep.pos.x - controller.pos.x);
+    const dy = Math.abs(creep.pos.y - controller.pos.y);
+
+    if (Math.max(dx, dy) > UPGRADE_RANGE) {
+        return false;
+    }
+
+    return creep.upgradeController(controller) === OK;
 }
 
 /**
@@ -1516,6 +1685,45 @@ export function withdrawEnergy(
     }
 
     return result;
+}
+
+/**
+ * Ищет структуру с энергией, ближайшую к крипу — в отличие от
+ * {@link findEnergyDonor}, который ищет ближайшую к **клеткам добычи**.
+ *
+ * @remarks
+ * Нужна спасательному крипу: он появляется у спавна и должен забрать
+ * энергию из расширения, а не идти за ней к источнику.
+ *
+ * @param creep       Крип, относительно которого ищем.
+ * @param exclude     Типы структур, которые брать нельзя (например, сам спавн:
+ *                    из спавна энергию вынимать незачем — задача спасателя
+ *                    наоборот, наполнить его).
+ * @returns Структура с энергией или `null`.
+ */
+export function findNearestEnergyDonor(
+    creep: Creep,
+    exclude: StructureConstant[] = []
+): AnyStoreStructure | null {
+    const candidates = creep.room.find(FIND_STRUCTURES, {
+        filter: (s): s is AnyStoreStructure =>
+            (s.structureType === STRUCTURE_EXTENSION ||
+                s.structureType === STRUCTURE_CONTAINER ||
+                s.structureType === STRUCTURE_STORAGE) &&
+            exclude.indexOf(s.structureType) === -1 &&
+            'store' in s &&
+            (s as AnyStoreStructure).store.energy > 0
+    }) as AnyStoreStructure[];
+
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    const found = creep.pos.findClosestByPath(candidates, {
+        ignore: [FIND_CREEPS]
+    });
+
+    return (found as AnyStoreStructure) ?? null;
 }
 
 /**

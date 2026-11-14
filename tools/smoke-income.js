@@ -297,8 +297,11 @@ function makeRoom(opts) {
         store: makeStore(opts.spawnEnergy === undefined ? 300 : opts.spawnEnergy, 300),
         spawning: null, room: null,
         spawnCreep(body, name, opts) {
-            const cost = body.reduce((sum, part) => sum + ({ move: 50, work: 100, carry: 50 }[part] || 0), 0);
-            if (room.energyAvailable < cost) {
+            const cost = body.reduce((sum, part) => sum + (BODYPART_COST[part] || 0), 0);
+            // The engine draws the energy from the SPAWN's own store, not
+            // from the room: the spawn holds at most 300 energy, so a body
+            // that costs more can never be created.
+            if (spawn.store.energy < cost) {
                 return -6; // ERR_NOT_ENOUGH_ENERGY
             }
             spawnAttempts.push({ name, role: opts && opts.memory ? opts.memory.role : '?', cost, body: body.slice() });
@@ -503,6 +506,40 @@ function actions(creep, kind) {
     check('the income of the room is measured, not modelled',
         typeof rate === 'number' && rate > 1 && rate < 3,
         `measured=${rate} model=4.2`);
+}
+
+// --- Scenario 3c: the measurement survives the source regeneration ---------
+// The source restores 3000 in one tick. If the bot reads the source's level
+// only every 25 ticks, everything harvested between the regeneration and the
+// sample is invisible: right after the regeneration the level is 3000, not
+// what it was before, and if the harvest in the next 25 ticks equals the
+// harvest before it, two samples show the same value and the income looks
+// like zero.
+//
+// In E34S53 this cost 0.73 energy/tick of measured income (4.72 measured vs
+// 5.45 real), and the room's budget is computed from the measurement.
+{
+    const sim = makeRoom({
+        creeps: [[20, 22, 'harvester', 0]]
+    });
+
+    // 12 ticks of digging, then the regeneration in one tick, then 13 more.
+    for (let i = 0; i < 12; i++) {
+        runTicks(sim, 1);
+    }
+
+    sim.source.energy = 3000;
+
+    for (let i = 0; i < 15; i++) {
+        runTicks(sim, 1);
+    }
+
+    const rate = sim.room.memory._incomeRate;
+    const harvested = sim.room.memory._harvested;
+
+    check('the income measurement survives the source regeneration',
+        typeof rate === 'number' && rate > 1.6 && rate < 2.4,
+        `measured=${rate} harvested=${harvested}`);
 }
 
 // --- Scenario 4: the extension planner does not eat a harvest tile ---------
@@ -756,6 +793,10 @@ function actions(creep, kind) {
 // the harvester carried 100 to hand over 50 and dragged the other 50 back
 // to the source, paying fatigue for it on the way. The rule now: carry
 // exactly what the target accepts, and come back with an empty backpack.
+//
+// The target here is the SPAWN: the room has just spent its last energy on a
+// new creep, so the spawn is empty and it is the only place where energy
+// turns into creeps (see `findEnergyTransferTarget`).
 {
     const sim = makeRoom({
         extensions: [[21, 24, 0]],
@@ -768,7 +809,7 @@ function actions(creep, kind) {
     const transfers = actions(harvester, 'transfer');
 
     check('the harvester delivers as soon as the target can take the load',
-        transfers.length > 0 && transfers[0][1] === 21 && transfers[0][2] === 24,
+        transfers.length > 0 && transfers[0][1] === 19 && transfers[0][2] === 26,
         JSON.stringify(harvester.actions));
 }
 
@@ -799,16 +840,17 @@ function actions(creep, kind) {
         JSON.stringify(planned));
 }
 
-// --- Scenario 11: the harvester delivers from the tile it stands on -------
+// --- Scenario 11: the spawn is fed before the extensions ------------------
 // The extension next to the harvest tile (21,24) holds only 10 free energy,
-// the spawn holds 190. The old rate model preferred the spawn: it is closer
-// by straight line and takes more energy, so the harvester walked to it -
-// across the birth ring around the spawn. The bot then pushed the harvester
-// off the ring (the ring reserve), the harvester came back, and the room
-// spent two thirds of its life walking instead of digging.
+// the spawn is empty. The spawn is the only place where the room's energy
+// becomes creeps: `spawnCreep` draws it from the spawn itself and never
+// looks at the extensions. So an empty spawn has to be filled first, even
+// though the extension is one step away and the spawn is ten.
 //
-// The rule now: a storage next to the harvest tile wins, because the energy
-// is handed over without leaving the tile.
+// Before the fix the room starved exactly this way: the harvesters filled
+// the extensions (including the far ones, which are useless - nothing brings
+// that energy to the spawn), the spawn stayed at 250 of 300, the creeps died
+// of old age, and the room could not afford a replacement for any of them.
 {
     const sim = makeRoom({
         extensions: [[21, 24, 40]],
@@ -820,7 +862,37 @@ function actions(creep, kind) {
     const harvester = sim.creeps[0];
     const transfers = actions(harvester, 'transfer');
 
-    check('the harvester hands the energy over from the harvest tile',
+    check('the spawn is fed before the extensions',
+        transfers.length > 0 && transfers[0][1] === 19 && transfers[0][2] === 26,
+        JSON.stringify(harvester.actions));
+}
+
+// --- Scenario 11a: a full spawn hands the energy over next door -----------
+// When the spawn does not need feeding, the extension next to the harvest
+// tile wins again: the energy is handed over without leaving the tile, and
+// the harvester spends the rest of its life digging instead of walking.
+//
+// The room needs a full crew, otherwise the bot spends the spawn's energy
+// on a new creep - and an emptied spawn is fed first (see Scenario 11).
+{
+    const sim = makeRoom({
+        extensions: [[21, 24, 40]],
+        creeps: [
+            [20, 24, 'harvester', 100],
+            [20, 23, 'harvester', 0],
+            [20, 22, 'harvester', 0],
+            [16, 21, 'upgrader', 0],
+            [16, 20, 'builder', 0]
+        ],
+        spawnEnergy: 300
+    });
+
+    runTicks(sim, 1);
+
+    const harvester = sim.creeps[0];
+    const transfers = actions(harvester, 'transfer');
+
+    check('a full spawn leaves the harvester on the harvest tile',
         transfers.length > 0 && transfers[0][1] === 21 && transfers[0][2] === 24,
         JSON.stringify(harvester.actions));
     const moves = actions(harvester, 'moveTo');
@@ -833,14 +905,14 @@ function actions(creep, kind) {
 // --- Scenario 11b: a stale delivery target does not pin the harvester -----
 // The delivery target is cached for DELIVERY_TARGET_TTL ticks so that the
 // creep does not jump between storages from tick to tick. But the cache must
-// not override the proximity rule: in E34S53 the harvesters were pinned to
-// the spawn for 25 ticks at a time, and the spawn is ten tiles away from the
-// harvest tiles. The measured income was 0.64 energy per tick instead of 6.
+// not override the rule that feeds the spawn: in E34S53 the harvesters were
+// pinned to a far extension for 25 ticks at a time while the spawn was
+// starving.
 {
     const sim = makeRoom({
         extensions: [[21, 24, 40]],
         creeps: [
-            [20, 24, 'harvester', 100, { _deliveryTarget: { id: 'spawn-1', tick: tick } }]
+            [20, 24, 'harvester', 100, { _deliveryTarget: { id: 'ext-21-24', tick: tick } }]
         ]
     });
 
@@ -849,8 +921,8 @@ function actions(creep, kind) {
     const harvester = sim.creeps[0];
     const transfers = actions(harvester, 'transfer');
 
-    check('a stale delivery target does not pin the harvester to a far storage',
-        transfers.length > 0 && transfers[0][1] === 21 && transfers[0][2] === 24,
+    check('a stale delivery target does not pin the harvester away from the spawn',
+        transfers.length > 0 && transfers[0][1] === 19 && transfers[0][2] === 26,
         JSON.stringify(harvester.actions));
 }
 
@@ -931,11 +1003,60 @@ function actions(creep, kind) {
 
     runTicks(sim, 1);
 
-    const planned = createdSites.length - before;
+    // Считаем именно расширения: комната может заказать и другие постройки
+    // (башню обороны), и они не должны влиять на лимит плана расширений.
+    const planned = createdSites
+        .slice(before)
+        .filter(([, , type]) => type === C.STRUCTURE_EXTENSION).length;
 
     check('the extension plan is bounded by the income of the room',
         planned > 0 && planned <= 2,
-        `planned=${planned}`);
+        `planned=${planned} all=${JSON.stringify(createdSites.slice(before))}`);
+}
+
+// --- Scenario 14b: the room plans a tower against invaders -----------------
+// The room had no defence at all: `runTowers` operated towers, but nothing
+// ever built one. On 2026-11-14 invaders cut the harvesters down around the
+// spawn (a hostile tombstone stood next to it) and the room was left with a
+// single builder and no income.
+//
+// The tower goes on a delivery tile next to a harvest tile: the harvester
+// feeds it in one step, and it covers the spawn.
+{
+    const sim = makeRoom({
+        creeps: [[20, 22, 'harvester', 0]]
+    });
+
+    sim.room.memory._incomeRate = 4;
+
+    // Ставим мок-конструктор площадок по умолчанию: он добавляет площадку в
+    // список комнаты, и бот видит свой заказ (и не планирует башню снова).
+    createdSites.length = 0;
+
+    runTicks(sim, 2);
+
+    const towers = createdSites.filter(([, , type]) => type === C.STRUCTURE_TOWER);
+    const ring = new Set(['18,25', '18,26', '18,27', '19,25', '19,27', '20,25', '20,26', '20,27']);
+    const harvestTiles = new Set(['20,22', '20,23', '20,24']);
+
+    check('the room plans a tower against invaders',
+        towers.length === 1,
+        JSON.stringify(createdSites));
+
+    check('the tower does not stand on the birth ring',
+        towers.length === 1 && !ring.has(`${towers[0][0]},${towers[0][1]}`),
+        towers.length ? `${towers[0][0]},${towers[0][1]}` : 'none');
+
+    check('the tower does not stand on a harvest tile',
+        towers.length === 1 && !harvestTiles.has(`${towers[0][0]},${towers[0][1]}`),
+        towers.length ? `${towers[0][0]},${towers[0][1]}` : 'none');
+
+    check('the tower stands next to a harvest tile, so the harvester feeds it',
+        towers.length === 1 && harvestTiles.has(`${towers[0][0] - 1},${towers[0][1]}`)
+            || harvestTiles.has(`${towers[0][0] + 1},${towers[0][1]}`)
+            || harvestTiles.has(`${towers[0][0]},${towers[0][1] - 1}`)
+            || harvestTiles.has(`${towers[0][0]},${towers[0][1] + 1}`),
+        towers.length ? `${towers[0][0]},${towers[0][1]}` : 'none');
 }
 
 // --- Scenario 15: two harvesters never claim the same harvest tile -------
@@ -991,9 +1112,15 @@ function actions(creep, kind) {
 // half of its life in fatigue. The upgrader walks to its donor and back, so
 // on swamp it spent more time walking than upgrading - and the controller
 // stood still for dozens of ticks at a time.
+// --- Scenario 17: every body fits the spawn's energy capacity -------------
+// `spawnCreep` draws the energy from the SPAWN itself, and the spawn's
+// store holds 300 energy. A body that costs more than that can never be
+// created, no matter how much energy the room has.
+//
+// The upgrader used to be [WORK, WORK, CARRY, MOVE, MOVE] = 350: it could
+// never be spawned, in any room, ever - and the colony ran for days on
+// harvesters doubling as upgraders, with no income in the structures.
 {
-    // The room is RCL 3 with three harvesters already, so the bot spawns an
-    // upgrader and the attempt records its body.
     const sim = makeRoom({
         creeps: [[20, 22, 'harvester', 0], [20, 23, 'harvester', 0], [20, 24, 'harvester', 0]],
         spawnEnergy: 400
@@ -1003,10 +1130,45 @@ function actions(creep, kind) {
 
     const attempt = sim.spawnAttempts.find((a) => a.role === 'upgrader');
     const body = attempt ? attempt.body : [];
+    const cost = body.reduce((sum, part) => sum + (BODYPART_COST[part] || 0), 0);
 
-    check('the upgrader has two MOVE parts from RCL 2 on',
-        body.filter((p) => p === 'move').length === 2,
+    check('the upgrader body fits the spawn capacity (300 energy)',
+        body.length > 0 && cost <= SPAWN_ENERGY_CAPACITY,
+        JSON.stringify({ body, cost }));
+
+    check('the upgrader still carries two WORK parts',
+        body.filter((p) => p === 'work').length === 2,
         JSON.stringify(body));
+}
+
+// --- Scenario 19: the harvester delivers before the room is broke -------
+// The harvester upgrades the controller in place, and the upgrade eats one
+// energy per tick while the harvest gives two. So the backpack grows by one
+// energy per tick and the delivery condition "the backpack holds at least
+// the trip load" is never true: the backpack sits exactly one energy below
+// it, forever.
+//
+// In E34S53 the three harvesters stood at 99 of 100 for days, the source
+// drained normally, and the spawn and extensions never changed by a single
+// point. The room had no income, could not pay for a replacement creep, and
+// was one creep death away from being dead for good.
+{
+    const sim = makeRoom({
+        creeps: [[20, 23, 'harvester', 60]],
+        spawnEnergy: 100
+    });
+
+    runTicks(sim, 1);
+
+    const creep = sim.creeps.find((c) => c.memory.role === 'harvester');
+    const acts = creep.actions || [];
+    const transferred = acts.some((a) => a[0] === 'transfer');
+    const harvested = acts.some((a) => a[0] === 'harvest');
+
+    check('a harvester with a half-full backpack goes to deliver',
+        transferred, JSON.stringify(acts));
+    check('a harvester with a half-full backpack stops digging',
+        !harvested, JSON.stringify(acts));
 }
 
 // --- Scenario 18: the movement does not pretend to ignore creeps ----------
