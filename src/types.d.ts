@@ -345,6 +345,15 @@ declare global {
             lastBucket: number;
             spawnsByRole: Record<string, number>;
             deathsByRole: Record<string, number>;
+            /**
+             * Возрасты последних умерших крипов по ролям (в тиках).
+             *
+             * @remarks
+             * Отличают смерть от старости (1500 тиков) от убийства: по одним
+             * счётчикам смертей «все харвестеры вымерли от старости» и
+             * «вторгатели вырезали их» выглядят одинаково.
+             */
+            deathAgesByRole?: Record<string, number[]>;
             totalSpawnEnergy: number;
         };
     }

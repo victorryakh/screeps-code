@@ -24,6 +24,9 @@ import { HOME_PATH_TTL } from './constants';
 
 const TRIP_SAMPLES_LIMIT = 20;
 
+/** Сколько возрастов смерти хранить по каждой роли. */
+const DEATH_AGES_LIMIT = 12;
+
 type PositionLike = RoomPosition | { pos: RoomPosition };
 
 /** Возвращает `RoomPosition`, разворачивая объекты с `.pos` (Source, Structure и т.п.). */
@@ -141,13 +144,18 @@ export function recordSpawn(role: string, cost: number, _bodyParts: number): voi
 }
 
 /**
- * Учитывает смерть крипа: инкрементирует `deathsByRole[role]`.
+ * Учитывает смерть крипа: инкрементирует `deathsByRole[role]` и запоминает
+ * возраст умершего.
  *
  * @param role     Имя роли умершего крипа.
- * @param ageTicks Возраст крипа в тиках. Зарезервировано для подробной
- *                 статистики при `Memory.debug === true`; в текущей
- *                 реализации явно игнорируется через `void` (подавление
- *                 предупреждения о неиспользуемом параметре).
+ * @param ageTicks Возраст крипа в тиках.
+ *
+ * @remarks
+ * Возраст смерти — единственный способ отличить смерть от старости
+ * (`CREEP_LIFE_TICKS` = 1500) от убийства: вторгатели в E34S53 вырезали
+ * харвестеров, и по счётчикам смертей это выглядело как «все умерли от
+ * старости». Последние возрасты хранятся небольшим списком (по ролям), чтобы
+ * по следующей проверке сразу было видно, что произошло.
  */
 export function recordCreepDeath(role: string, ageTicks: number): void {
     if (!Memory.metrics) {
@@ -162,8 +170,16 @@ export function recordCreepDeath(role: string, ageTicks: number): void {
 
     m.deathsByRole[role]++;
 
-    if (Memory.debug && role) {
-        void ageTicks;
+    if (!role) {
+        return;
+    }
+
+    const agesByRole = m.deathAgesByRole ?? (m.deathAgesByRole = {});
+    const ages = agesByRole[role] ?? (agesByRole[role] = []);
+    ages.push(ageTicks);
+
+    if (ages.length > DEATH_AGES_LIMIT) {
+        ages.splice(0, ages.length - DEATH_AGES_LIMIT);
     }
 }
 
