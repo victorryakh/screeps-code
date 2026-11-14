@@ -1339,6 +1339,15 @@ function affordableExtensions(room: Room, counts: Record<string, number>): numbe
  *   переданную энергию нельзя посчитать как разницу `store` внутри одного
  *   тика — она всегда нулевая.
  *
+ * **Уровень источника читается каждый тик, а не раз в 25.** Иначе весь сток
+ * между регенерацией и замером теряется: на уровне регенерации стоит 3000, а
+ * не то, что было до неё, и если за 25 тиков до регенерации уровень упал
+ * ровно на столько же, сколько набрал после, — два замера показывают одно и
+ * то же значение, и добыча не видна вообще. В E34S53 это стоило 0.73 энергии
+ * в тик измеренного дохода (4.72 против фактических 5.45), а бюджет комнаты
+ * считается именно по замеру: чем меньше измеренный доход, тем меньше
+ * рабочих комната себе позволяет.
+ *
  * @param room Комната.
  */
 function updateIncomeRate(room: Room): void {
@@ -1349,12 +1358,39 @@ function updateIncomeRate(room: Room): void {
     }
 
     const now = Game.time;
+    const current = source.energy;
     const lastTick = room.memory._incomeSampleTick;
-    const lastEnergy = room.memory._incomeSampleEnergy;
 
-    if (lastTick === undefined || lastEnergy === undefined) {
+    // Сток накапливается ПО ТИКУ: каждый тик сравниваем уровень источника с
+    // предыдущим чтением.
+    //
+    // - Уровень упал → сток равен падению.
+    // - Уровень вырос → это регенерация одним куском (движок ставит 3000 в
+    //   начале тика, потом отнимает добычу этого тика). Сток после
+    //   регенерации — это 3000 минус текущий уровень, а сток ДО регенерации
+    //   уже посчитан на прошлом тике: уровень прошлого чтения и есть уровень
+    //   перед регенерацией.
+    //
+    // Читать уровень раз в 25 тиков нельзя: на уровне регенерации стоит
+    // 3000, а не то, что было до неё. Если за 25 тиков до регенерации уровень
+    // упал ровно на столько же, сколько набрал после, — два замера показывают
+    // одно и то же значение и добыча не видна вообще.
+    const prev = room.memory._sourceEnergy;
+
+    if (prev !== undefined && prev !== current) {
+        const drained =
+            current < prev
+                ? prev - current
+                : Math.max(0, SOURCE_ENERGY_CAPACITY - current);
+
+        room.memory._harvested = (room.memory._harvested ?? 0) + drained;
+    }
+
+    room.memory._sourceEnergy = current;
+
+    if (lastTick === undefined) {
         room.memory._incomeSampleTick = now;
-        room.memory._incomeSampleEnergy = source.energy;
+        room.memory._incomeSampleEnergy = current;
         room.memory._incomeWindowTick = now;
         room.memory._harvested = 0;
         return;
@@ -1364,24 +1400,8 @@ function updateIncomeRate(room: Room): void {
         return;
     }
 
-    const current = source.energy;
-
     room.memory._incomeSampleTick = now;
     room.memory._incomeSampleEnergy = current;
-
-    // Источник восстанавливается сразу целиком: за один тик его энергия
-    // прыгает с нуля (или с любого остатка) до 3000. Поэтому «сколько
-    // убавилось» между двумя замерами — не всегда «сколько добыли».
-    //
-    // Если энергия источника выросла, значит между замерами был скачок
-    // регенерации, и добыто было 3000 минус остаток. Раньше такие замеры
-    // просто отбрасывались, а это как раз те замеры, где добычи больше
-    // всего: доход комнаты занижался вдвое, бюджет не покрывал и одного
-    // апгрейдера, и колония жила в долг.
-    const harvested =
-        current > lastEnergy
-            ? Math.max(0, SOURCE_ENERGY_CAPACITY - current)
-            : Math.max(0, lastEnergy - current);
 
     // Окно накопления начинается с прошлого замера, а не с текущего
     // момента: иначе первое же деление даёт «добычу за один тик» и доход
@@ -1396,8 +1416,6 @@ function updateIncomeRate(room: Room): void {
     }
 
     const windowStart = room.memory._incomeWindowTick;
-
-    room.memory._harvested = (room.memory._harvested ?? 0) + harvested;
 
     const window = now - windowStart;
 

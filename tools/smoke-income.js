@@ -508,6 +508,40 @@ function actions(creep, kind) {
         `measured=${rate} model=4.2`);
 }
 
+// --- Scenario 3c: the measurement survives the source regeneration ---------
+// The source restores 3000 in one tick. If the bot reads the source's level
+// only every 25 ticks, everything harvested between the regeneration and the
+// sample is invisible: right after the regeneration the level is 3000, not
+// what it was before, and if the harvest in the next 25 ticks equals the
+// harvest before it, two samples show the same value and the income looks
+// like zero.
+//
+// In E34S53 this cost 0.73 energy/tick of measured income (4.72 measured vs
+// 5.45 real), and the room's budget is computed from the measurement.
+{
+    const sim = makeRoom({
+        creeps: [[20, 22, 'harvester', 0]]
+    });
+
+    // 12 ticks of digging, then the regeneration in one tick, then 13 more.
+    for (let i = 0; i < 12; i++) {
+        runTicks(sim, 1);
+    }
+
+    sim.source.energy = 3000;
+
+    for (let i = 0; i < 15; i++) {
+        runTicks(sim, 1);
+    }
+
+    const rate = sim.room.memory._incomeRate;
+    const harvested = sim.room.memory._harvested;
+
+    check('the income measurement survives the source regeneration',
+        typeof rate === 'number' && rate > 1.6 && rate < 2.4,
+        `measured=${rate} harvested=${harvested}`);
+}
+
 // --- Scenario 4: the extension planner does not eat a harvest tile ---------
 // Losing one of the three harvest tiles is a third of the room's income.
 {
