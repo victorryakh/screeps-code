@@ -87,6 +87,7 @@ Object.assign(global, C, {
     OK: 0, ERR_BUSY: -4, ERR_NOT_ENOUGH_ENERGY: -6, ERR_INVALID_ARGS: -10,
     ERR_NAME_EXISTS: -3, ERR_RCL_NOT_ENOUGH: -14, ERR_NOT_OWNER: -1,
     ERR_INVALID_TARGET: -7, ERR_FULL: -8, ERR_TIRED: -11, ERR_NO_PATH: -2, ERR_NOT_IN_RANGE: -9,
+    ERR_NOT_ENOUGH_RESOURCES: -6,
     MOVE: 'move', WORK: 'work', CARRY: 'carry', ATTACK: 'attack',
     RANGED_ATTACK: 'ranged_attack', TOUGH: 'tough', HEAL: 'heal', CLAIM: 'claim',
     CONTROLLER_STRUCTURES: {
@@ -158,6 +159,9 @@ function near(a, b) {
 
 const BODIES = {
     harvester: ['work', 'carry', 'carry', 'move', 'move'],
+    // The emergency body: a 50-energy backpack. Its delivery threshold is
+    // exactly its backpack capacity, which is what makes it fragile.
+    rescue: ['work', 'carry', 'move', 'move'],
     upgrader: ['work', 'work', 'carry', 'move'],
     builder: ['work', 'carry', 'carry', 'move', 'move'],
     repairer: ['work', 'carry', 'move', 'move']
@@ -171,8 +175,9 @@ function makeStore(energy, capacity) {
     };
 }
 
-function makeCreep(x, y, role, energy, extra) {
-    const bodyParts = (BODIES[role] || BODIES.harvester).map((type) => ({ type, hits: 100 }));
+function makeCreep(x, y, role, energy, extra, bodyTypes) {
+    const bodyParts = (bodyTypes || BODIES[role] || BODIES.harvester)
+        .map((type) => ({ type, hits: 100 }));
     const capacity = bodyParts.filter((p) => p.type === 'carry').length * 50;
     const store = {
         energy: energy || 0,
@@ -222,6 +227,14 @@ function makeCreep(x, y, role, energy, extra) {
                 this.actions.push(['upgrade-fail']);
                 return ERR_NOT_IN_RANGE;
             }
+            // The engine spends the energy: an upgrade takes one energy per
+            // WORK per tick. Without this the mock cannot reproduce a
+            // harvester that never reaches its delivery threshold.
+            if (this.store.energy <= 0) {
+                this.actions.push(['upgrade-fail']);
+                return ERR_NOT_ENOUGH_RESOURCES;
+            }
+            this.store.energy -= 1;
             this.actions.push(['upgrade']);
             return OK;
         },
@@ -253,7 +266,7 @@ function makeCreep(x, y, role, energy, extra) {
 function makeRoom(opts) {
     opts = opts || {};
     const creeps = (opts.creeps || []).map(
-        ([x, y, role, energy, extra]) => makeCreep(x, y, role, energy, extra)
+        ([x, y, role, energy, extra, body]) => makeCreep(x, y, role, energy, extra, body)
     );
     const sites = (opts.sites || []).map(([x, y, progress]) => ({
         structureType: C.STRUCTURE_EXTENSION, pos: pos(x, y), my: true, progress: progress || 0,
@@ -473,6 +486,37 @@ const DEAD_ROOM = {
     check('the extension sites the room cannot pay for are removed',
         alive.length === 0,
         `${alive.length} of ${sites.length} left`);
+}
+
+// --- Scenario 4b: a small backpack still reaches the delivery threshold ---
+// The emergency body has a 50-energy backpack, and the delivery threshold is
+// `min(trip load, 50)` - the trip load is capped by the backpack capacity, so
+// the threshold is exactly 50. The in-place upgrade spends one energy per
+// tick, and the harvest gives `min(2, free slots)`. With one free slot the
+// harvest gives 1 and the upgrade takes 1: the backpack never grows past 49,
+// the threshold is never reached, and the creep delivers nothing forever.
+//
+// In E34S53 the harvester stood at 49 of 50 for hours while the source
+// drained normally and the spawn received nothing.
+{
+    const sim = makeRoom({
+        creeps: [[20, 24, 'harvester', 49, {}, BODIES.rescue]],
+        spawnEnergy: 200,
+        extensions: [[21, 24, 0]]
+    });
+
+    runTicks(sim, 3);
+
+    const harvester = sim.creeps.find((c) => c.memory.role === 'harvester');
+    const transfers = actions(harvester, 'transfer');
+    const upgrades = actions(harvester, 'upgrade');
+
+    check('a harvester with a small backpack still delivers',
+        transfers.length > 0,
+        `transfers=${JSON.stringify(transfers)} store=${harvester.store.energy}`);
+    check('the in-place upgrade does not eat the last energy point',
+        upgrades.length === 0 || harvester.store.energy >= upgrades.length,
+        `upgrades=${upgrades.length} store=${harvester.store.energy}`);
 }
 
 // --- Scenario 5: the controller-stall warning keeps one dedup key ----------
