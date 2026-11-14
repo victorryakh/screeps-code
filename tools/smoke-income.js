@@ -759,6 +759,10 @@ function actions(creep, kind) {
 // the harvester carried 100 to hand over 50 and dragged the other 50 back
 // to the source, paying fatigue for it on the way. The rule now: carry
 // exactly what the target accepts, and come back with an empty backpack.
+//
+// The target here is the SPAWN: the room has just spent its last energy on a
+// new creep, so the spawn is empty and it is the only place where energy
+// turns into creeps (see `findEnergyTransferTarget`).
 {
     const sim = makeRoom({
         extensions: [[21, 24, 0]],
@@ -771,7 +775,7 @@ function actions(creep, kind) {
     const transfers = actions(harvester, 'transfer');
 
     check('the harvester delivers as soon as the target can take the load',
-        transfers.length > 0 && transfers[0][1] === 21 && transfers[0][2] === 24,
+        transfers.length > 0 && transfers[0][1] === 19 && transfers[0][2] === 26,
         JSON.stringify(harvester.actions));
 }
 
@@ -802,16 +806,17 @@ function actions(creep, kind) {
         JSON.stringify(planned));
 }
 
-// --- Scenario 11: the harvester delivers from the tile it stands on -------
+// --- Scenario 11: the spawn is fed before the extensions ------------------
 // The extension next to the harvest tile (21,24) holds only 10 free energy,
-// the spawn holds 190. The old rate model preferred the spawn: it is closer
-// by straight line and takes more energy, so the harvester walked to it -
-// across the birth ring around the spawn. The bot then pushed the harvester
-// off the ring (the ring reserve), the harvester came back, and the room
-// spent two thirds of its life walking instead of digging.
+// the spawn is empty. The spawn is the only place where the room's energy
+// becomes creeps: `spawnCreep` draws it from the spawn itself and never
+// looks at the extensions. So an empty spawn has to be filled first, even
+// though the extension is one step away and the spawn is ten.
 //
-// The rule now: a storage next to the harvest tile wins, because the energy
-// is handed over without leaving the tile.
+// Before the fix the room starved exactly this way: the harvesters filled
+// the extensions (including the far ones, which are useless - nothing brings
+// that energy to the spawn), the spawn stayed at 250 of 300, the creeps died
+// of old age, and the room could not afford a replacement for any of them.
 {
     const sim = makeRoom({
         extensions: [[21, 24, 40]],
@@ -823,7 +828,37 @@ function actions(creep, kind) {
     const harvester = sim.creeps[0];
     const transfers = actions(harvester, 'transfer');
 
-    check('the harvester hands the energy over from the harvest tile',
+    check('the spawn is fed before the extensions',
+        transfers.length > 0 && transfers[0][1] === 19 && transfers[0][2] === 26,
+        JSON.stringify(harvester.actions));
+}
+
+// --- Scenario 11a: a full spawn hands the energy over next door -----------
+// When the spawn does not need feeding, the extension next to the harvest
+// tile wins again: the energy is handed over without leaving the tile, and
+// the harvester spends the rest of its life digging instead of walking.
+//
+// The room needs a full crew, otherwise the bot spends the spawn's energy
+// on a new creep - and an emptied spawn is fed first (see Scenario 11).
+{
+    const sim = makeRoom({
+        extensions: [[21, 24, 40]],
+        creeps: [
+            [20, 24, 'harvester', 100],
+            [20, 23, 'harvester', 0],
+            [20, 22, 'harvester', 0],
+            [16, 21, 'upgrader', 0],
+            [16, 20, 'builder', 0]
+        ],
+        spawnEnergy: 300
+    });
+
+    runTicks(sim, 1);
+
+    const harvester = sim.creeps[0];
+    const transfers = actions(harvester, 'transfer');
+
+    check('a full spawn leaves the harvester on the harvest tile',
         transfers.length > 0 && transfers[0][1] === 21 && transfers[0][2] === 24,
         JSON.stringify(harvester.actions));
     const moves = actions(harvester, 'moveTo');
@@ -836,14 +871,14 @@ function actions(creep, kind) {
 // --- Scenario 11b: a stale delivery target does not pin the harvester -----
 // The delivery target is cached for DELIVERY_TARGET_TTL ticks so that the
 // creep does not jump between storages from tick to tick. But the cache must
-// not override the proximity rule: in E34S53 the harvesters were pinned to
-// the spawn for 25 ticks at a time, and the spawn is ten tiles away from the
-// harvest tiles. The measured income was 0.64 energy per tick instead of 6.
+// not override the rule that feeds the spawn: in E34S53 the harvesters were
+// pinned to a far extension for 25 ticks at a time while the spawn was
+// starving.
 {
     const sim = makeRoom({
         extensions: [[21, 24, 40]],
         creeps: [
-            [20, 24, 'harvester', 100, { _deliveryTarget: { id: 'spawn-1', tick: tick } }]
+            [20, 24, 'harvester', 100, { _deliveryTarget: { id: 'ext-21-24', tick: tick } }]
         ]
     });
 
@@ -852,8 +887,8 @@ function actions(creep, kind) {
     const harvester = sim.creeps[0];
     const transfers = actions(harvester, 'transfer');
 
-    check('a stale delivery target does not pin the harvester to a far storage',
-        transfers.length > 0 && transfers[0][1] === 21 && transfers[0][2] === 24,
+    check('a stale delivery target does not pin the harvester away from the spawn',
+        transfers.length > 0 && transfers[0][1] === 19 && transfers[0][2] === 26,
         JSON.stringify(harvester.actions));
 }
 

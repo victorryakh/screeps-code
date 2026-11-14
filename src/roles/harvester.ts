@@ -28,9 +28,70 @@ import {
     deliveryTripLoad,
     upgradeRoomController,
     upgradeControllerInPlace,
+    withdrawEnergy,
+    findNearestEnergyDonor,
     runStepAside
 } from '../utilities';
 import { DELIVERY_MIN_TRIP } from '../constants';
+
+/**
+ * Аварийный режим спасательного харвестера.
+ *
+ * @remarks
+ * Спасательный крип появляется в комнате, у которой не осталось ни одного
+ * рабочего: спавн не может оплатить обычное тело, а энергия в комнате лежит
+ * в расширениях, до которых спавн не дотягивается. Такая комната не может
+ * заказать крипа никогда — `spawnCreep` берёт энергию из самого спавна, а
+ * спавн не регенерирует, пока энергии в спавне и расширениях комнаты больше
+ * 300.
+ *
+ * Поэтому задача спасателя простая и не про добычу: перенести уже добытую
+ * энергию из расширения в спавн. Энергия источника нужна нормальным
+ * харвестерам, а энергия расширения лежит без дела: до спавна её никто не
+ * донесёт.
+ *
+ * @param creep Спасательный крип.
+ * @returns `true`, если крип занят спасением; `false` — если спасать больше
+ *          нечего и крип должен вернуться к обычной работе.
+ */
+function runRescue(creep: Creep): boolean {
+    const spawn = creep.room.find(FIND_MY_SPAWNS)[0];
+
+    if (!spawn) {
+        return false;
+    }
+
+    if (spawn.store.getFreeCapacity(RESOURCE_ENERGY) <= 0) {
+        // Спавн полон — задача выполнена, крип работает как обычный.
+        delete creep.memory.rescue;
+
+        return false;
+    }
+
+    if (creep.store[RESOURCE_ENERGY] > 0) {
+        // Несём добытое в спавн.
+        transferEnergy(creep, spawn, {
+            visualizePathStyle: { stroke: '#ffaa00' }
+        });
+
+        return true;
+    }
+
+    const donor = findNearestEnergyDonor(creep);
+
+    if (!donor) {
+        // Доноров нет — спасать нечего, работаем как обычный харвестер.
+        delete creep.memory.rescue;
+
+        return false;
+    }
+
+    withdrawEnergy(creep, donor, {
+        visualizePathStyle: { stroke: '#ffaa00' }
+    });
+
+    return true;
+}
 
 /**
  * Выполняет один шаг harvester-а. См. описание модуля.
@@ -40,6 +101,13 @@ import { DELIVERY_MIN_TRIP } from '../constants';
  *              спавне через `_harvesterIndex`).
  */
 export function run(creep: Creep): void {
+    // Спасательный режим: крип переносит энергию из расширений в спавн.
+    // Это единственный способ запустить комнату, у которой в спавне меньше
+    // энергии, чем стоит любое обычное тело.
+    if (creep.memory.rescue && runRescue(creep)) {
+        return;
+    }
+
     // Сдвиг в сторону — исключение из правил роли, но только когда рюкзак
     // пуст: нести энергию в сторону бессмысленно, рейс пропадёт (см.
     // `ensureCreepsNotConfined` в `room.ts`).

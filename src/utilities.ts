@@ -10,6 +10,8 @@ import {
     DELIVERY_TARGET_TTL,
     DELIVERY_FATIGUE_FACTOR,
     SPAWN_FEED_PRIORITY,
+    SPAWN_RESERVE_ENERGY,
+    RESCUE_HARVESTER_BODIES,
     UNREACHABLE_DELIVERY_DISTANCE,
     CONFINED_REGION_MIN_GROWTH,
     STEP_ASIDE_RADIUS,
@@ -144,12 +146,21 @@ export function bodyCost(body: BodyPartConstant[]): number {
  * Возвращает массив частей тела по имени роли. Базовые роли хардкоднуты,
  * удалённые (`RHARVESTER`, `RESERVER`, `CLAIMER`) берутся из {@link EXPANSION}.
  *
+ * @remarks
+ * Уровень контроллера в выборе тела **не участвует**: ёмкость хранилища
+ * спавна — 300 энергий при любом RCL (`SPAWN_ENERGY_CAPACITY`), а
+ * `spawnCreep` берёт энергию из одного спавна. Поэтому тело дороже 300 не
+ * создаётся никогда, и апгрейдер не может быть больше 300 энергий ни в RCL 1,
+ * ни в RCL 8. Раньше здесь был параметр `rcl`, и тело апгрейдера зависело от
+ * него: с RCL 2 — 350 энергий, то есть тело, которое нельзя создать ни при
+ * каком запасе энергии в комнате.
+ *
  * @param role Имя роли. Лучше передавать значения из {@link ROLE}, но тип
  *             расширен до `string` ради совместимости с устаревшими данными
  *             в `Memory.creeps`. Для неизвестной роли возвращается
  *             минимальное тело `[WORK, CARRY, MOVE]`.
  */
-export function bodyFor(role: string, rcl: number = 1): BodyPartConstant[] {
+export function bodyFor(role: string): BodyPartConstant[] {
     switch (role) {
         case ROLE.HARVESTER:
             // Тело харвестера подобрано под реальную геометрию комнаты:
@@ -203,6 +214,47 @@ export function bodyFor(role: string, rcl: number = 1): BodyPartConstant[] {
         default:
             return [WORK, CARRY, MOVE];
     }
+}
+
+/**
+ * Подбирает уменьшенное тело харвестера, которое влезает в указанный запас
+ * энергии.
+ *
+ * @remarks
+ * Нужно ровно одно место — когда спавн не может оплатить основное тело
+ * (300 энергий), но комната ещё жива. Без такого запасного пути комната
+ * с 250 энергиями в спавне и 400 в расширениях не может заказать ни одного
+ * крипа: `spawnCreep` берёт энергию из самого спавна, а спавн не регенерирует,
+ * пока в комнате больше 300 энергии.
+ *
+ * Тело должно остаться харвестером: с WORK (добыча или снятие энергии со
+ * структуры), с CARRY (рюкзак) и хотя бы с одним MOVE.
+ *
+ * @param role      Имя роли. Спасательное тело умеет только харвестер.
+ * @param available Сколько энергии лежит в спавне.
+ * @returns Тело, которое влезает в запас, или `null`, если не влезает ни одно.
+ */
+export function rescueBodyFor(role: string, available: number): BodyPartConstant[] | null {
+    if (role !== ROLE.HARVESTER) {
+        return null;
+    }
+
+    for (const body of RESCUE_HARVESTER_BODIES) {
+        const cost = bodyCost(body);
+
+        // Тело дешевле резерва не годится: без CARRY энергию не донести до
+        // спавна, без MOVE — не дойти. Первое рабочее тело стоит ровно
+        // столько, сколько спавн обязан держать про запас.
+        if (cost < SPAWN_RESERVE_ENERGY) {
+            continue;
+        }
+
+        if (cost <= available) {
+            return body;
+        }
+    }
+
+    return null;
 }
 
 /**
@@ -418,6 +470,51 @@ export function findEnergyTransferTarget(
 
     if (candidates.length === 0) {
         return null;
+    }
+
+    // Спавн — единственное место, где энергия комнаты превращается в крипов.
+    //
+    // `spawnCreep` берёт энергию **из самого спавна**: сколько бы её ни лежало
+    // в расширениях, спавн её не увидит. Поэтому, пока в спавне есть свободное
+    // место, сдавать энергию надо туда — иначе она лежит там, куда спавн не
+    // дотягивается.
+    //
+    // Раньше выбор шёл по «скорости доставки», и спавн проигрывал всегда:
+    // расширение в один шаг от клетки добычи даёт rate = 50/(25+51) ≈ 0.66, а
+    // спавн в девяти шагах через болото — 50/(25+9·51) ≈ 0.10, и даже
+    // трёхкратный множитель `SPAWN_FEED_PRIORITY` не дотягивал. В E34S53 спавн
+    // так и стоял на 250 энергиях из 300, а комната копила 400 энергии в
+    // расширениях, до которых спавн не дотягивается: крипов заменить нечем,
+    // и счётчик энергии в комнате от этого не рос.
+    //
+    // Правило жёсткое и проверяется **до** кэша цели и до выбора «ближних»
+    // хранилищ: кэш живёт {@link DELIVERY_TARGET_TTL} тиков, и за это время
+    // харвестер продолжал бы носить энергию в дальнее расширение.
+    //
+    // Но только если до спавна **есть путь**. Площадки расширений и сами
+    // расширения занимают клетки, и кольцо рождения вокруг спавна может быть
+    // перекрыто: тогда путь не находится, спавн помечается недостижимым, и
+    // харвестер пошёл бы к нему в стену. В этом случае действует обычное
+    // правило выбора цели.
+    //
+    // Побочный эффект тот же, что и в движке: спавн регенерирует по 1 энергии
+    // за тик, пока энергии в спавне и расширениях комнаты меньше 300. Пока
+    // энергия лежит в спавне, а не в расширениях, у комнаты остаётся этот
+    // бесплатный подпор — единственный способ починить себя после потери
+    // всех крипов.
+    const spawnCandidate = candidates.find(
+        (c) => c.structureType === STRUCTURE_SPAWN
+    ) as AnyStoreStructure | undefined;
+
+    if (
+        spawnCandidate &&
+        spawnCandidate.store.energy <
+            (spawnCandidate.store.getCapacity?.(RESOURCE_ENERGY) ?? 0) &&
+        deliveryPathDistance(creep, spawnCandidate) >= 0
+    ) {
+        creep.memory._deliveryTarget = { id: spawnCandidate.id, tick: Game.time };
+
+        return spawnCandidate;
     }
 
     // Хранилище рядом с клеткой добычи — лучший вариант по определению:
@@ -1588,6 +1685,45 @@ export function withdrawEnergy(
     }
 
     return result;
+}
+
+/**
+ * Ищет структуру с энергией, ближайшую к крипу — в отличие от
+ * {@link findEnergyDonor}, который ищет ближайшую к **клеткам добычи**.
+ *
+ * @remarks
+ * Нужна спасательному крипу: он появляется у спавна и должен забрать
+ * энергию из расширения, а не идти за ней к источнику.
+ *
+ * @param creep       Крип, относительно которого ищем.
+ * @param exclude     Типы структур, которые брать нельзя (например, сам спавн:
+ *                    из спавна энергию вынимать незачем — задача спасателя
+ *                    наоборот, наполнить его).
+ * @returns Структура с энергией или `null`.
+ */
+export function findNearestEnergyDonor(
+    creep: Creep,
+    exclude: StructureConstant[] = []
+): AnyStoreStructure | null {
+    const candidates = creep.room.find(FIND_STRUCTURES, {
+        filter: (s): s is AnyStoreStructure =>
+            (s.structureType === STRUCTURE_EXTENSION ||
+                s.structureType === STRUCTURE_CONTAINER ||
+                s.structureType === STRUCTURE_STORAGE) &&
+            exclude.indexOf(s.structureType) === -1 &&
+            'store' in s &&
+            (s as AnyStoreStructure).store.energy > 0
+    }) as AnyStoreStructure[];
+
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    const found = creep.pos.findClosestByPath(candidates, {
+        ignore: [FIND_CREEPS]
+    });
+
+    return (found as AnyStoreStructure) ?? null;
 }
 
 /**

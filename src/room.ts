@@ -119,12 +119,17 @@ export function run(room: Room): void {
     ensureSpawnAccessible(room);
     ensureSpawnRingReserve(room);
 
+    ensureBirthExit(room);
+
     // Площадки расширений, которые комната не оправдывает, снимаются
-    // после разбора кольца рождения: кольцо важнее — там спавн, и его
-    // разблокировка может потребовать снести постройку.
+    // после разбора кольца рождения и выхода из него: кольцо и выход важнее —
+    // там спавн, и его разблокировка может потребовать снести постройку.
+    //
+    // Порядок важен ещё и потому, что площадка расширения занимает клетку
+    // (движок не пускает по ней крипа) и может перекрыть коридор к спавну.
+    // Снятая площадка открывает путь, которого раньше не было.
     cancelUnaffordableExtensionSites(room, layout.maxExtensions);
 
-    ensureBirthExit(room);
     ensureCreepsNotBlocking(room);
     updateSourceSaturation(room, counts);
     updateIncomeRate(room);
@@ -145,12 +150,30 @@ export function run(room: Room): void {
 
     markExcessWorkers(room, homeCreeps, spawnOrder);
 
+    // Аварийный путь: если в комнате не осталось ни одного рабочего, спавну
+    // можно заказать уменьшенное тело.
+    //
+    // Обычное тело харвестера стоит 300 энергий — ровно столько, сколько
+    // вмещает спавн. Если в спавне 250, а остальные 400 лежат в расширениях,
+    // комната не может заказать ни одного крипа: `spawnCreep` берёт энергию
+    // из самого спавна, а спавн не регенерирует, пока энергии в комнате
+    // больше 300. Такой комнате нужен крип дешевле — любой ценой.
+    //
+    // Пока рабочие есть, уменьшенное тело недопустимо: спавн опустошается на
+    // каждом спавне и набирается заново, и бот заводил бы урезанных
+    // харвестеров вместо полноценных.
+    const workerCount =
+        (counts[ROLE.HARVESTER] || 0) +
+        (counts[ROLE.UPGRADER] || 0) +
+        (counts[ROLE.BUILDER] || 0) +
+        (counts[ROLE.REPAIRER] || 0);
+
     for (const pair of spawnOrder) {
         const role = pair[0];
         const targetCount = pair[1];
 
         if ((counts[role] || 0) < targetCount) {
-            if (trySpawn(room, role)) {
+            if (trySpawn(room, role, { allowReducedBody: workerCount === 0 })) {
                 // Не больше одного крипа за тик.
                 break;
             }
@@ -1267,8 +1290,20 @@ function affordableExtensions(room: Room, counts: Record<string, number>): numbe
     const income = effectiveIncome(room, counts);
 
     if (income <= 0) {
-        // Дохода нет совсем — ограничивать нечем.
-        return Number.POSITIVE_INFINITY;
+        // Дохода нет совсем — комната не может оправдать **ни одного**
+        // расширения.
+        //
+        // Раньше здесь возвращался `Infinity`: «ограничивать нечем». Это было
+        // ровно наоборот — ограничение снималось в тот самый момент, когда
+        // комната была беднее всего. Планировщик заказывал расширения по
+        // лимиту RCL, а `cancelUnaffordableExtensionSites` при `Infinity`
+        // выходил сразу и ничего не снимал. В E34S53 так накопилось 11
+        // расширений и ещё 18 площадок — 54 000 энергии работы, которые
+        // комната не зарабатывает даже за 27 000 тиков, и которые занимают
+        // клетки, время билдера и лимит RCL.
+        //
+        // Ноль дохода — это тоже ответ: «ничего не заказывай».
+        return 0;
     }
 
     const affordable = Math.floor(
@@ -1431,8 +1466,9 @@ function watchControllerProgress(room: Room): void {
         return;
     }
 
-    log.warn(
+    log.warnOnce(
         'room',
+        `controller-stalled|${room.name}`,
         `controller of ${room.name} has not progressed for ${stalled} ticks ` +
         `(progress ${progress}, downgrade in ${controller.ticksToDowngrade} ticks) — ` +
         'the upgrader is probably stuck without energy'

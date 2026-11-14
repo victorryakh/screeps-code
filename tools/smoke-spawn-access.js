@@ -107,7 +107,30 @@ let currentRoom = null;
 const WALLS = new Set(['18,25']);
 const SWAMP = new Set(['19,25', '20,25', '20,26']);
 
-function pos(x, y) { return { x, y, roomName: 'E34S53' }; }
+function pos(x, y) {
+    return {
+        x,
+        y,
+        roomName: 'E34S53',
+        isEqualTo(other) {
+            return this.x === other.x && this.y === other.y && this.roomName === other.roomName;
+        },
+        findClosestByPath(type, opts) {
+            if (!currentRoom) {
+                return null;
+            }
+            const list = currentRoom.find(type, opts);
+            return list.length > 0 ? list[0] : null;
+        },
+        findClosestByRange(type, opts) {
+            if (!currentRoom) {
+                return null;
+            }
+            const list = currentRoom.find(type, opts);
+            return list.length > 0 ? list[0] : null;
+        }
+    };
+}
 
 function makeRoom(opts) {
     opts = opts || {};
@@ -145,12 +168,29 @@ function makeRoom(opts) {
     }));
     const creeps = (opts.creeps || []).map(([x, y], i) => ({
         name: `creep_${i}`, pos: pos(x, y), my: true, hits: 300, hitsMax: 300,
-        fatigue: 0, store: { energy: 0 },
+        fatigue: 0,
+        store: {
+            energy: 0,
+            getCapacity() { return 50; },
+            getFreeCapacity() { return 50 - this.energy; },
+            getUsedCapacity() { return this.energy; }
+        },
         body: [{ type: 'work', hits: 100 }, { type: 'carry', hits: 100 }, { type: 'move', hits: 100 }],
         memory: { role: 'harvester', homeRoom: 'E34S53' },
         room: null,
         moveTo(target) { movedCreeps.push([x, y, target.x, target.y]); return OK; },
-        moveByPath() { return -4; }
+        moveByPath() { return -4; },
+        harvest(source) {
+            if (Math.max(Math.abs(this.pos.x - source.pos.x), Math.abs(this.pos.y - source.pos.y)) > 1) {
+                return ERR_NOT_IN_RANGE;
+            }
+            this.store.energy = Math.min(50, this.store.energy + 2);
+            source.energy -= 2;
+            return OK;
+        },
+        withdraw() { return ERR_NOT_IN_RANGE; },
+        transfer() { return ERR_NOT_IN_RANGE; },
+        upgradeController() { return ERR_NOT_IN_RANGE; }
     }));
     const source = { type: 'source', pos: pos(19, 23), energy: 3000, room: null };
 
@@ -225,9 +265,11 @@ let world = null;
 
 function makeGame(sim) {
     world = sim;
+    const liveCreeps = {};
+    for (const c of sim.creeps) liveCreeps[c.name] = c;
     return {
         rooms: { E34S53: sim.room },
-        creeps: {},
+        creeps: liveCreeps,
         spawns: { Spawn1: sim.spawn },
         structures: {},
         time: tick,
@@ -273,8 +315,15 @@ function runTicks(sim, n, step) {
 }
 
 // --- Scenario 1: extensions must not be planned on the spawn's ring-1 ----
+// The room needs a harvester: the extension plan is bounded by the room's
+// income, and a room without workers has no income at all - there is nothing
+// it could pay for.
 {
-    const sim = makeRoom({ extensions: [[17, 25]], sites: [] });
+    const sim = makeRoom({
+        extensions: [[17, 25]],
+        sites: [],
+        creeps: [[20, 23], [20, 22], [20, 24]]
+    });
     global.Memory = {};
     runTicks(sim, 3);
     const ring1 = createdSites.filter(([x, y]) => Math.max(Math.abs(x - 19), Math.abs(y - 26)) === 1);
@@ -283,6 +332,25 @@ function runTicks(sim, n, step) {
         `created=${JSON.stringify(createdSites)} ring1=${JSON.stringify(ring1)}`);
     check('extension sites are planned further out',
         createdSites.length > 0 && createdSites.every(([x, y]) => Math.max(Math.abs(x - 19), Math.abs(y - 26)) >= 2),
+        JSON.stringify(createdSites));
+}
+
+// --- Scenario 1a: a room without income plans nothing ---------------------
+// The extension plan is bounded by the income. A room with no harvesters has
+// no income, so it must not promise to build anything: every construction
+// site is a claim on energy the room does not have.
+//
+// Before the fix the bound was `Infinity` exactly when the room was broke,
+// so the planner queued extensions by the RCL limit and the cleanup never
+// removed them. E34S53 ended up with 11 extensions and 18 sites - 54 000
+// energy of work the room earns in 27 000 ticks.
+{
+    createdSites.length = 0;
+    const sim = makeRoom({ extensions: [[17, 25]], sites: [], creeps: [] });
+    global.Memory = {};
+    runTicks(sim, 3);
+    check('a room without income plans no extensions',
+        createdSites.length === 0,
         JSON.stringify(createdSites));
 }
 
