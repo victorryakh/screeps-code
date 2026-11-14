@@ -912,7 +912,7 @@ function runTowers(room: Room, defense: { attackHostiles: boolean; healInjured: 
  * @param ring Снимок состояния кольца.
  * @returns `true`, если площадка снята.
  */
-function freeBirthTileByRemovingSite(ring: SpawnRingInfo): boolean {
+function freeBirthTileByRemovingSite(ring: SpawnRingInfo, roomName: string): boolean {
     for (const site of ring.birthSites) {
         const remove = (site as ConstructionSite & { remove?: () => number }).remove;
 
@@ -921,8 +921,9 @@ function freeBirthTileByRemovingSite(ring: SpawnRingInfo): boolean {
         }
 
         if (remove.call(site) === OK) {
-            log.warn(
+            log.warnOnce(
                 'room',
+                `removed-site-on-ring|${roomName}|${site.pos.x},${site.pos.y}`,
                 `removed construction site at ${site.pos.x},${site.pos.y} — a site on ` +
                 'the birth ring holds that tile forever'
             );
@@ -945,7 +946,7 @@ function freeBirthTileByRemovingSite(ring: SpawnRingInfo): boolean {
  * @param ring Снимок состояния кольца.
  * @returns `true`, если расширение снесено.
  */
-function freeBirthTileByDestroyingEmptyExtension(ring: SpawnRingInfo): boolean {
+function freeBirthTileByDestroyingEmptyExtension(ring: SpawnRingInfo, roomName: string): boolean {
     const empty = ring.adjacentExtensions
         .filter((e) => e.store.energy === 0)
         .sort((a, b) => (a.pos.x - b.pos.x) || (a.pos.y - b.pos.y));
@@ -957,8 +958,9 @@ function freeBirthTileByDestroyingEmptyExtension(ring: SpawnRingInfo): boolean {
     }
 
     if (target.destroy() === OK) {
-        log.warn(
+        log.warnOnce(
             'room',
+            `destroyed-empty-extension|${roomName}|${target.pos.x},${target.pos.y}`,
             `destroyed empty extension at ${target.pos.x},${target.pos.y} — it held a ` +
             'birth tile and stored nothing'
         );
@@ -979,7 +981,7 @@ function freeBirthTileByDestroyingEmptyExtension(ring: SpawnRingInfo): boolean {
  * @param ring Снимок состояния кольца.
  * @returns `true`, если расширение снесено.
  */
-function freeBirthTileByDestroyingExtension(ring: SpawnRingInfo): boolean {
+function freeBirthTileByDestroyingExtension(ring: SpawnRingInfo, roomName: string): boolean {
     const target = ring.adjacentExtensions
         .slice()
         .sort((a, b) => a.store.energy - b.store.energy)[0];
@@ -989,8 +991,9 @@ function freeBirthTileByDestroyingExtension(ring: SpawnRingInfo): boolean {
     }
 
     if (target.destroy() === OK) {
-        log.warn(
+        log.warnOnce(
             'room',
+            `destroyed-extension|${roomName}|${target.pos.x},${target.pos.y}`,
             `destroyed extension at ${target.pos.x},${target.pos.y}: only ` +
             `${ring.freeTilesWithoutCreeps} birth tile(s) left around the spawn`
         );
@@ -1063,7 +1066,7 @@ function ensureSpawnRingReserve(room: Room): void {
         }
 
         // Стройплощадка на кольце — клетка, потерянная навсегда.
-        if (freeBirthTileByRemovingSite(ring)) {
+        if (freeBirthTileByRemovingSite(ring, room.name)) {
             continue;
         }
 
@@ -1083,8 +1086,9 @@ function ensureSpawnRingReserve(room: Room): void {
             const moved = moveCreepsOffBirthTiles(room, spawn, ring, needed);
 
             if (moved > 0) {
-                log.warn(
+                log.warnOnce(
                     'room',
+                    `moved-off-ring|${room.name}|${spawn.name}`,
                     `moved ${moved} creep(s) off the birth ring of spawn ${spawn.name} ` +
                     `in ${room.name}: only ${ring.freeTiles.length} free birth tile(s) left`
                 );
@@ -1095,14 +1099,14 @@ function ensureSpawnRingReserve(room: Room): void {
 
         // Пустое расширение на кольце держит клетку вхолостую: энергии в
         // нём нет, а клетку рождения оно блокирует.
-        if (freeBirthTileByDestroyingEmptyExtension(ring)) {
+        if (freeBirthTileByDestroyingEmptyExtension(ring, room.name)) {
             continue;
         }
 
         // Последний довод: сносим расширение с наименьшим запасом —
         // постройка на расстоянии вытяжки от спавна того же стоит, а вот
         // запечатанный спавн не лечится сам.
-        freeBirthTileByDestroyingExtension(ring);
+        freeBirthTileByDestroyingExtension(ring, room.name);
     }
 }
 
@@ -1598,8 +1602,9 @@ function ensureSpawnAccessible(room: Room): void {
 
         if (!sealedSince) {
             room.memory._sealedSpawnTick = Game.time;
-            log.warn(
+            log.warnOnce(
                 'room',
+                `sealed-spawn|${room.name}|${spawn.name}`,
                 `spawn ${spawn.name} in ${room.name} is sealed — the engine cannot place ` +
                 `new creeps, the colony is idle. Blocked by ${ring.birthTiles.length - ring.freeTiles.length} ` +
                 'birth tile(s); the bot will free a cell shortly.'
@@ -1626,8 +1631,9 @@ function ensureSpawnAccessible(room: Room): void {
             room.memory._sealedSpawnTick = Game.time;
             room.memory._sealedSpawnHealTick = Game.time;
 
-            log.warn(
+            log.warnOnce(
                 'room',
+                `blocked-by-creeps|${room.name}|${spawn.name}`,
                 `spawn ${spawn.name} in ${room.name} is blocked by ` +
                 `${ring.creepsOnBirthTiles.length} of our creeps on the birth ring — ` +
                 `${moved} moved away`
@@ -1640,14 +1646,14 @@ function ensureSpawnAccessible(room: Room): void {
         // держат клетку и не освободят её никогда (достроенное расширение
         // занимало бы ту же клетку). Потом сносим одно расширение — по
         // одному, а не все сразу: ёмкость комнаты нужна ей самой.
-        if (freeBirthTileByRemovingSite(ring)) {
+        if (freeBirthTileByRemovingSite(ring, room.name)) {
             room.memory._sealedSpawnTick = Game.time;
             room.memory._sealedSpawnHealTick = Game.time;
 
             continue;
         }
 
-        if (freeBirthTileByDestroyingEmptyExtension(ring)) {
+        if (freeBirthTileByDestroyingEmptyExtension(ring, room.name)) {
             room.memory._sealedSpawnTick = Game.time;
             room.memory._sealedSpawnHealTick = Game.time;
 
@@ -1655,7 +1661,7 @@ function ensureSpawnAccessible(room: Room): void {
         }
 
         if (ring.adjacentExtensions.length > 0) {
-            freeBirthTileByDestroyingExtension(ring);
+            freeBirthTileByDestroyingExtension(ring, room.name);
 
             room.memory._sealedSpawnTick = Game.time;
             room.memory._sealedSpawnHealTick = Game.time;

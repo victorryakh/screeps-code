@@ -103,9 +103,15 @@ export function trySpawn(room: Room, role: string, options: SpawnOptions = {}): 
             // Энергия в комнате есть, но она лежит в расширениях, а спавн
             // их не видит. Это не «нет денег», это «деньги не там» — и
             // сообщить об этом стоит, иначе комната выглядит платёжеспособной.
+            //
+            // Ключ дедупликации — постоянный: в тексте есть текущий запас
+            // спавна, и он меняется каждый тик, а значит обычный `warn`
+            // (который дедуплицируется по тексту) слал бы по письму на
+            // каждое новое значение.
             if (spawn.room.energyAvailable >= cost) {
-                log.warn(
+                log.warnOnce(
                     'spawn',
+                    `spawn-short|${room.name}|${role}`,
                     `cannot spawn ${role} in ${room.name}: the spawn holds only ` +
                     `${spawn.store.energy} of ${cost} energy — the rest sits in ` +
                     'extensions, and spawnCreep only draws from the spawn itself'
@@ -119,8 +125,9 @@ export function trySpawn(room: Room, role: string, options: SpawnOptions = {}): 
         cost = bodyCost(body);
         reduced = true;
 
-        log.warn(
+        log.warnOnce(
             'spawn',
+            `emergency-body|${room.name}|${role}`,
             `emergency body for ${role} in ${room.name}: the spawn holds only ` +
             `${spawn.store.energy} of ${fullCost} energy, so a reduced body ` +
             `(${cost}) was ordered to restart the colony`
