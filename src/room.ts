@@ -26,6 +26,8 @@ import {
     EXTENSION_BUILD_COST,
     EXTENSION_PAYBACK_TICKS,
     CONTAINER_BUILD_COST,
+    TOWER_BUILD_COST,
+    TOWER_RANGE,
     DELIVERY_STRUCTURE_CHECK_INTERVAL,
     BUILDER_RESERVE_ENERGY,
     BUILDER_TRIP_ENERGY,
@@ -114,6 +116,7 @@ export function run(room: Room): void {
     }
 
     ensureDeliveryStructures(room);
+    ensureDefenseTowers(room);
 
     ensureSpawn(room);
     ensureSpawnAccessible(room);
@@ -847,6 +850,171 @@ function builderCanWork(room: Room): boolean {
     const trip = Math.min(remaining, BUILDER_TRIP_ENERGY);
 
     return room.energyAvailable >= trip + BUILDER_RESERVE_ENERGY;
+}
+
+/**
+ * Планирует башни для обороны от вторгателей.
+ *
+ * @remarks
+ * Вторгатели — единственная причина, по которой колония может лишиться
+ * всех рабочих разом. В E34S53 14.11.2026 они вырезали харвестеров у
+ * спавна (в комнате остался чужой томбоун рядом со спавном, а контейнер,
+ * которому было 90 000 из 250 000 хитов, разрушили), и комната осталась с
+ * одним билдером: спавн опустел, доход упал, контроллер перестал расти.
+ *
+ * Башня ставится **на клетку доставки рядом с клеткой добычи**:
+ * - харвестер сдаёт в неё энергию в один шаг (значит, башня сыта);
+ * - она накрывает спавн (расстояние до него ≤ `TOWER_RANGE`) и подходы к
+ *   нему, то есть стреляет по вторгателям именно там, где они вредят.
+ *
+ * Клетки добычи и кольцо рождения занимать нельзя: башня на клетке добычи
+ * отнимает её у харвестеров, а на кольце — закрывает рождение крипов.
+ *
+ * Заказ — только если комната доведёт башню до конца (см.
+ * {@link canFundDeliveryStructure}).
+ *
+ * @param room Комната.
+ */
+function ensureDefenseTowers(room: Room): void {
+    const controller = room.controller;
+
+    if (!controller || controller.level < 3) {
+        return;
+    }
+
+    if (
+        room.memory._towerCheckTick &&
+        Game.time - room.memory._towerCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._towerCheckTick = Game.time;
+
+    const limit = CONTROLLER_STRUCTURES[STRUCTURE_TOWER]?.[controller.level] ?? 0;
+
+    if (!limit) {
+        return;
+    }
+
+    const built = room.find(FIND_MY_STRUCTURES, {
+        filter: (s) => s.structureType === STRUCTURE_TOWER
+    }).length;
+
+    const sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
+        filter: (s) => s.structureType === STRUCTURE_TOWER
+    }).length;
+
+    if (built + sites >= limit) {
+        return;
+    }
+
+    if (!canFundDeliveryStructure(room, TOWER_BUILD_COST)) {
+        return;
+    }
+
+    const spot = findTowerSpot(room);
+
+    if (!spot) {
+        return;
+    }
+
+    const result = room.createConstructionSite(spot.x, spot.y, STRUCTURE_TOWER);
+
+    if (result === OK) {
+        log.info(
+            'room',
+            `planned a tower at ${spot.x},${spot.y} in ${room.name} — the room has no defence against invaders`
+        );
+    }
+}
+
+/**
+ * Ищет клетку для башни: свободную, проходимую, не клетку добычи и не
+ * кольцо рождения, в пределах досягаемости спавна.
+ *
+ * @param room Комната.
+ * @returns Клетка или `null`.
+ */
+function findTowerSpot(room: Room): RoomPosition | null {
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+
+    if (!spawn) {
+        return null;
+    }
+
+    const occupied = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const s of room.find(FIND_MY_CONSTRUCTION_SITES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    const harvestSlots = collectHarvestSlotKeys(room);
+    const ring = ringTileKeysOf(spawn);
+    const terrain = room.getTerrain();
+
+    let best: RoomPosition | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const key of collectDeliveryTileKeys(room)) {
+        const [x, y] = key.split(',').map(Number);
+
+        if (x === undefined || y === undefined) {
+            continue;
+        }
+
+        if (occupied.has(key) || harvestSlots.has(key) || ring.has(key)) {
+            continue;
+        }
+
+        if (terrain.get(x, y) === WALL_TERRAIN) {
+            continue;
+        }
+
+        // Башня должна доставать до спавна — иначе она не защищает то
+        // место, ради которого затевается.
+        const distance = Math.max(
+            Math.abs(x - spawn.pos.x),
+            Math.abs(y - spawn.pos.y)
+        );
+
+        if (distance > TOWER_RANGE) {
+            continue;
+        }
+
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = new RoomPosition(x, y, room.name);
+        }
+    }
+
+    return best;
+}
+
+/**
+ * Клетки кольца рождения вокруг спавна (восемь соседей).
+ *
+ * @param spawn Спавн.
+ * @returns Множество ключей `"x,y"`.
+ */
+function ringTileKeysOf(spawn: StructureSpawn): Set<string> {
+    const keys = new Set<string>();
+
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            if (dx === 0 && dy === 0) {
+                continue;
+            }
+
+            keys.add(`${spawn.pos.x + dx},${spawn.pos.y + dy}`);
+        }
+    }
+
+    return keys;
 }
 
 /**

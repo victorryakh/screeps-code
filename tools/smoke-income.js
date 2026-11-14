@@ -1003,11 +1003,60 @@ function actions(creep, kind) {
 
     runTicks(sim, 1);
 
-    const planned = createdSites.length - before;
+    // Считаем именно расширения: комната может заказать и другие постройки
+    // (башню обороны), и они не должны влиять на лимит плана расширений.
+    const planned = createdSites
+        .slice(before)
+        .filter(([, , type]) => type === C.STRUCTURE_EXTENSION).length;
 
     check('the extension plan is bounded by the income of the room',
         planned > 0 && planned <= 2,
-        `planned=${planned}`);
+        `planned=${planned} all=${JSON.stringify(createdSites.slice(before))}`);
+}
+
+// --- Scenario 14b: the room plans a tower against invaders -----------------
+// The room had no defence at all: `runTowers` operated towers, but nothing
+// ever built one. On 2026-11-14 invaders cut the harvesters down around the
+// spawn (a hostile tombstone stood next to it) and the room was left with a
+// single builder and no income.
+//
+// The tower goes on a delivery tile next to a harvest tile: the harvester
+// feeds it in one step, and it covers the spawn.
+{
+    const sim = makeRoom({
+        creeps: [[20, 22, 'harvester', 0]]
+    });
+
+    sim.room.memory._incomeRate = 4;
+
+    // Ставим мок-конструктор площадок по умолчанию: он добавляет площадку в
+    // список комнаты, и бот видит свой заказ (и не планирует башню снова).
+    createdSites.length = 0;
+
+    runTicks(sim, 2);
+
+    const towers = createdSites.filter(([, , type]) => type === C.STRUCTURE_TOWER);
+    const ring = new Set(['18,25', '18,26', '18,27', '19,25', '19,27', '20,25', '20,26', '20,27']);
+    const harvestTiles = new Set(['20,22', '20,23', '20,24']);
+
+    check('the room plans a tower against invaders',
+        towers.length === 1,
+        JSON.stringify(createdSites));
+
+    check('the tower does not stand on the birth ring',
+        towers.length === 1 && !ring.has(`${towers[0][0]},${towers[0][1]}`),
+        towers.length ? `${towers[0][0]},${towers[0][1]}` : 'none');
+
+    check('the tower does not stand on a harvest tile',
+        towers.length === 1 && !harvestTiles.has(`${towers[0][0]},${towers[0][1]}`),
+        towers.length ? `${towers[0][0]},${towers[0][1]}` : 'none');
+
+    check('the tower stands next to a harvest tile, so the harvester feeds it',
+        towers.length === 1 && harvestTiles.has(`${towers[0][0] - 1},${towers[0][1]}`)
+            || harvestTiles.has(`${towers[0][0] + 1},${towers[0][1]}`)
+            || harvestTiles.has(`${towers[0][0]},${towers[0][1] - 1}`)
+            || harvestTiles.has(`${towers[0][0]},${towers[0][1] + 1}`),
+        towers.length ? `${towers[0][0]},${towers[0][1]}` : 'none');
 }
 
 // --- Scenario 15: two harvesters never claim the same harvest tile -------

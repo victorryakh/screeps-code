@@ -205,6 +205,8 @@ declare global {
         _budgetCheckTick?: number;
         /** Сколько энергии в тик комната может тратить на работу (см. `computeWorkBudget`). */
         _workBudget?: number;
+        /** Тик последней проверки планирования башен обороны. */
+        _towerCheckTick?: number;
         /** Тик последнего замера энергии в источнике комнаты. */
         _incomeSampleTick?: number;
         /** Энергия в источнике на момент последнего замера. */
