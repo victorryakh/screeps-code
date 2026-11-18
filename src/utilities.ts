@@ -502,11 +502,28 @@ export function findEnergyTransferTarget(
     // энергия лежит в спавне, а не в расширениях, у комнаты остаётся этот
     // бесплатный подпор — единственный способ починить себя после потери
     // всех крипов.
+    //
+    // **Приоритет спавна действует только пока комнате нужен крип.** Пока
+    // список `_pendingSpawnRoles` (роли, которых не хватает — см.
+    // `planSpawnOrder`) не пуст, энергию надо нести в спавн: `spawnCreep`
+    // берёт её только оттуда. А когда комната ничего не заказывает, энергия
+    // в спавне просто лежит: ёмкость спавна — 300, и заказать крипа без
+    // нужды нельзя, поэтому эти 300 — мёртвый запас, который ещё и отнимает
+    // у харвестеров доставку в один шаг (расширения рядом с клетками добычи
+    // пустуют, и энергия идёт через полкомнаты).
+    //
+    // В E34S53 (18.11.2026) так и было: бюджет комнаты не позволял завести
+    // ни билдера, ни ремонтника, список ролей был пуст, а спавн стоял на
+    // 250 из 300 и не дотягивал до 300 — то есть крипа заказать было нельзя,
+    // и харвестеры при этом сдавали энергию только в него.
+    const spawnNeeded = (room.memory._pendingSpawnRoles?.length ?? 0) > 0;
+
     const spawnCandidate = candidates.find(
         (c) => c.structureType === STRUCTURE_SPAWN
     ) as AnyStoreStructure | undefined;
 
     if (
+        spawnNeeded &&
         spawnCandidate &&
         spawnCandidate.store.energy <
             (spawnCandidate.store.getCapacity?.(RESOURCE_ENERGY) ?? 0) &&
@@ -1565,9 +1582,16 @@ function isHarvestTileTakenByOther(creep: Creep, tile: RoomPosition): boolean {
  *трое ниже расчётного.
  *
  * @param creep Крип, относительно которого ищется донор.
+ * @param exclude Типы структур, которые брать нельзя. Например, спавн:
+ *                из спавна энергию билдеру брать незачем — спавн это
+ *                фабрика крипов, и энергия из него уходит на замену
+ *                умирающих рабочих, а не на стройку.
  * @returns Структура с энергией или `null`.
  */
-export function findEnergyDonor(creep: Creep): AnyStoreStructure | null {
+export function findEnergyDonor(
+    creep: Creep,
+    exclude: StructureConstant[] = []
+): AnyStoreStructure | null {
     const room = creep.room;
 
     // Контейнеры — не «свои» структуры: движок не отдаёт их в
@@ -1579,6 +1603,7 @@ export function findEnergyDonor(creep: Creep): AnyStoreStructure | null {
                 s.structureType === STRUCTURE_EXTENSION ||
                 s.structureType === STRUCTURE_STORAGE ||
                 (s.structureType === STRUCTURE_CONTAINER && canUseContainer(room))) &&
+            exclude.indexOf(s.structureType) === -1 &&
             'store' in s &&
             (s as AnyStoreStructure).store.energy > 0
     }) as AnyStoreStructure[];
@@ -2765,6 +2790,25 @@ export function findBuildSpot(creep: Creep, site: ConstructionSite): RoomPositio
         return null;
     }
 
+    // Клетку выбираем по длине пути, а не по расстоянию по прямой.
+    //
+    // Расстояние по прямой зависит от того, где билдер оказался в этот
+    // момент, и в комнате со стенами рельефа врёт: в E34S53 билдер, ушедший
+    // на западную равнину, выбирал клетку (18,20) — в далёком углу комнаты —
+    // и потом тащил энергию через полкомнаты к контейнеру на (19,21), который
+    // стоит в шаге от клеток добычи. По прямой (18,20) была «ближе» к билдеру
+    // (4 клетки против 5), а по пути — на пять клеток дальше.
+    //
+    // Считаем путь движком (`PathFinder.search` с несколькими целями): он
+    // возвращает путь к ближайшей достижимой цели, то есть ту, до которой
+    // билдер дойдёт быстрее всего.
+    const byPath = findClosestCandidateByPath(creep.pos, candidates);
+
+    if (byPath) {
+        return byPath.pos;
+    }
+
+    // Путь посчитать не удалось — берём клетку по прямой, как раньше.
     candidates.sort((a, b) => {
         const da = Math.max(Math.abs(a.x - creep.pos.x), Math.abs(a.y - creep.pos.y));
         const db = Math.max(Math.abs(b.x - creep.pos.x), Math.abs(b.y - creep.pos.y));

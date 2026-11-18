@@ -867,6 +867,39 @@ function actions(creep, kind) {
         JSON.stringify(harvester.actions));
 }
 
+// --- Scenario 11z: a half-full spawn is fed only while a creep is needed ---
+// The spawn holds 250 of 300 and the room has its full crew, so nothing has
+// to be ordered: the energy the spawn is missing would sit there untouched
+// (a creep needs the whole 300 in the spawn), while the extension next to
+// the harvest tile is one step away and keeps the room's bank.
+//
+// In E34S53 (18.11.2026) the spawn stood at 250 of 300 for days: the
+// budget allowed no new role, the crew was complete, and yet every
+// harvester carried its energy to the spawn - across the swamp - while the
+// extensions next to the source stood empty.
+{
+    const sim = makeRoom({
+        extensions: [[21, 24, 0]],
+        creeps: [
+            [20, 24, 'harvester', 100],
+            [20, 23, 'harvester', 0],
+            [20, 22, 'harvester', 0],
+            [16, 21, 'upgrader', 0],
+            [16, 20, 'builder', 0]
+        ],
+        spawnEnergy: 250
+    });
+
+    runTicks(sim, 1);
+
+    const harvester = sim.creeps[0];
+    const transfers = actions(harvester, 'transfer');
+
+    check('a half-full spawn is not the priority while the crew is complete',
+        transfers.length > 0 && transfers[0][1] === 21 && transfers[0][2] === 24,
+        JSON.stringify(harvester.actions));
+}
+
 // --- Scenario 11a: a full spawn hands the energy over next door -----------
 // When the spawn does not need feeding, the extension next to the harvest
 // tile wins again: the energy is handed over without leaving the tile, and
@@ -1263,10 +1296,21 @@ function actions(creep, kind) {
         JSON.stringify(kept.map((s) => `${s.pos.x},${s.pos.y}`)));
 }
 
-// --- Scenario 21: the builder still waits when the room cannot fund a trip -
-// Control for the check above: the chunk must leave the workers' reserve
-// alone. With 350 energy in the room the builder may not start a trip
-// (a backpack of 100 plus the 300 reserve).
+// --- Scenario 21: the builder never takes energy from the spawn -----------
+// The spawn is the creep factory: `spawnCreep` draws energy from the spawn
+// itself, and the energy there is what the room spends on replacing the
+// workers that die of old age every 1500 ticks. The builder must not
+// compete with that.
+//
+// The old rule ("the room needs a backpack plus a 300 reserve in total")
+// froze the builder in E34S53 forever: `room.energyAvailable` is the spawn
+// plus the extensions, the spawn could never drop to zero (the colony lives
+// off it), so the condition `energyAvailable >= 100 + 300` never held. The
+// builder stood in place for all 1500 ticks of its life and the container
+// site stayed at 3437 of 5000.
+//
+// The new rule: the builder takes energy from the room's bank (extensions,
+// storage, container) and leaves the spawn alone.
 {
     const sim = makeRoom({
         creeps: [
@@ -1284,10 +1328,43 @@ function actions(creep, kind) {
     runTicks(sim, 1);
 
     const builder = sim.creeps[4];
+    const spawnTouched = builder.actions.some((a) => a[1] === 19 && a[2] === 26);
 
-    check('the builder waits when the room cannot fund one trip',
-        builder.actions.length === 0,
+    check('the builder takes energy from the bank, not from the spawn',
+        !spawnTouched,
         JSON.stringify({ balance: sim.room.energyAvailable, actions: builder.actions }));
+
+    check('the builder does not stand still when the room has a bank',
+        builder.actions.length > 0,
+        JSON.stringify({ balance: sim.room.energyAvailable, actions: builder.actions }));
+}
+
+// --- Scenario 21b: with no bank at all the builder works the controller ---
+// The room has nothing to give the builder except the spawn, and the spawn
+// is off limits. Then the builder must not stand in place: it upgrades the
+// controller with whatever it has.
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 50],
+            [20, 23, 'harvester', 50],
+            [20, 24, 'harvester', 50],
+            [20, 21, 'upgrader', 0],
+            [19, 27, 'builder', 0]
+        ],
+        spawnEnergy: 300,
+        extensions: [],
+        sites: [[21, 28, 0]]
+    });
+
+    runTicks(sim, 1);
+
+    const builder = sim.creeps[4];
+    const spawnTouched = builder.actions.some((a) => a[1] === 19 && a[2] === 26);
+
+    check('the builder does not take from the spawn even when it is the only source',
+        !spawnTouched,
+        JSON.stringify({ actions: builder.actions }));
 }
 
 // --- Scenario 22: extension sites the room cannot justify are cancelled ----
