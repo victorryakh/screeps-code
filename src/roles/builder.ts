@@ -11,7 +11,7 @@
  * сайты. Если сайтов нет — апгрейдит контроллер.
  * ==========================================================================*/
 
-import { BUILDER_RESERVE_ENERGY } from '../constants';
+import { BUILD_SPOT_TTL, DELIVERY_MIN_TRIP } from '../constants';
 import {
     harvestEnergy,
     findClosestSource,
@@ -19,8 +19,6 @@ import {
     findDeliverySite,
     findEnergyDonor,
     findBuildSpot,
-    findFreeTileNear,
-    collectHarvestSlotKeys,
     buildAt,
     isSourceSaturated,
     upgradeFromWorkSpot,
@@ -71,10 +69,26 @@ function isBuildable(site: ConstructionSite): boolean {
  * (доставка энергии сокращается с десяти клеток до одной), поэтому такие
  * площадки билдер строит первыми. Остальные — по ближайшей.
  *
+ * **Исключение — башня обороны.** Она стоит в первом ряду всегда:
+ * - вторгатели бьют по харвестерам, и без башни колония вымирает. В E34S53
+ *   14.11.2026 они оставили комнату с одним билдером — и комната перестала
+ *   производить энергию вовсе;
+ * - башня обходится дешевле контейнера (1000 против 5000), а контейнер — это
+ *   «дырка» для излишка, то есть оптимизация дохода, а не выживание.
+ *
  * @param creep Крип-билдер.
  * @returns Площадка или `null`, если строить нечего.
  */
 function findSiteToBuild(creep: Creep): ConstructionSite | null {
+    const tower = findConstructionSite(
+        creep,
+        (s) => isBuildable(s) && s.structureType === STRUCTURE_TOWER
+    );
+
+    if (tower) {
+        return tower;
+    }
+
     return findDeliverySite(creep, isBuildable) ?? findConstructionSite(creep, isBuildable);
 }
 
@@ -83,7 +97,14 @@ function findSiteToBuild(creep: Creep): ConstructionSite | null {
  *
  * @remarks
  * Клетка кэшируется, чтобы билдер не пересчитывал её каждый тик, но
- * пересчитывается, если её занял другой крип или площадка сменилась.
+ * пересчитывается, если её занял другой крип, площадка сменилась или
+ * прошёл срок жизни кэша.
+ *
+ * Срок жизни нужен потому, что клетка зависит от того, **где билдер
+ * оказался**, а он ходит по комнате: без срока жизни билдер, ушедший на
+ * западную равнину, навсегда оставлял клетку стройки в далёком углу и тащил
+ * энергию через полкомнаты. В E34S53 клетка (18,20) была выбрана, когда
+ * билдер стоял на западе, и осталась за ним до самой его смерти.
  *
  * @param creep Крип-билдер.
  * @param site  Стройплощадка, которую нужно достроить.
@@ -92,11 +113,15 @@ function findSiteToBuild(creep: Creep): ConstructionSite | null {
 function ensureBuildSpot(creep: Creep, site: ConstructionSite): RoomPosition | null {
     const room = creep.room;
     const cached = creep.memory._buildSpot;
+    const age = creep.memory._buildSpotTick
+        ? Game.time - creep.memory._buildSpotTick
+        : Number.POSITIVE_INFINITY;
 
     if (
         cached &&
         cached.roomName === room.name &&
-        cached.siteId === site.id
+        cached.siteId === site.id &&
+        age < BUILD_SPOT_TTL
     ) {
         const busy = room.find(FIND_CREEPS, {
             filter: (c) =>
@@ -117,38 +142,13 @@ function ensureBuildSpot(creep: Creep, site: ConstructionSite): RoomPosition | n
             roomName: spot.roomName,
             siteId: site.id
         };
+        creep.memory._buildSpotTick = Game.time;
     } else {
         delete creep.memory._buildSpot;
+        delete creep.memory._buildSpotTick;
     }
 
     return spot;
-}
-
-/**
- * Уводит крипа с клетки добычи, если он на ней оказался.
- *
- * @remarks
- * Клетки добычи — конечный ресурс. В E34S53 их три, и билдер, вставший на
- * одну из них, отнимал у харвестеров треть дохода комнаты, стоя там без
- * дела. Клетка добычи также не место для ожидания.
- *
- * @param creep Крип.
- */
-function stepOffHarvestSlots(creep: Creep): void {
-    const room = creep.room;
-    const slots = collectHarvestSlotKeys(room);
-
-    if (!slots.has(`${creep.pos.x},${creep.pos.y}`)) {
-        return;
-    }
-
-    const spot = findFreeTileNear(room, creep.pos, slots);
-
-    if (spot) {
-        moveCached(creep, spot, {
-            visualizePathStyle: { stroke: '#ffaa00' }
-        });
-    }
 }
 
 /**
@@ -277,17 +277,50 @@ export function run(creep: Creep): void {
                     creep.store.getFreeCapacity(RESOURCE_ENERGY)
                 );
 
-                if (creep.room.energyAvailable < chunk + BUILDER_RESERVE_ENERGY) {
-                    // Денег пока нет — ждём, но с клетки добычи уходим:
-                    // она принадлежит харвестерам.
-                    stepOffHarvestSlots(creep);
+                // Может ли комната позволить билдеру забрать этот груз.
+                //
+                // Проверять надо **то, что донор реально может отдать**, а не
+                // баланс комнаты. `room.energyAvailable` — это спавн плюс
+                // расширения (движок считает только их, башни не в счёт), и
+                // в E34S53 это значение никогда не достигало требуемых 400
+                // (груз 100 + резерв 300): спавн не мог опустеть до нуля —
+                // из него комната живёт, — и расширения рядом с клетками
+                // добычи пустовали.
+                //
+                // Итог был такой: билдер стоял на месте все 1500 тиков своей
+                // жизни. Площадка контейнера не двигалась (3437 из 5000), а
+                // 300 энергий каждые 1500 тиков уходили на крипа, который не
+                // делал ничего. Это был чистый убыток: крип стоил 300
+                // энергий дохода комнаты и не давал ни единицы прогресса.
+                const donor = findEnergyDonor(creep, [STRUCTURE_SPAWN]);
+                const available = donor ? Math.min(chunk, donor.store.energy) : 0;
+
+                if (
+                    !donor ||
+                    available < Math.min(chunk, DELIVERY_MIN_TRIP)
+                ) {
+                    // Строить нечем. Но и стоять нельзя: билдер, который
+                    // ничего не делает, стоит комнате полную стоимость тела
+                    // каждые 1500 тиков. Пусть работает контроллером тем, что
+                    // уже есть в рюкзаке: контроллер без прогресса — это
+                    // медленный даунгрейд комнаты.
+                    upgradeFromWorkSpot(creep, {
+                        visualizePathStyle: { stroke: '#ffffff' }
+                    });
+
                     return;
                 }
             }
 
-            const donor = findEnergyDonor(creep);
+            const donor = findEnergyDonor(creep, [STRUCTURE_SPAWN]);
 
             if (!donor) {
+                // Доноров нет — делать нечего, но и стоять на месте нельзя:
+                // лучше качать контроллер.
+                upgradeFromWorkSpot(creep, {
+                    visualizePathStyle: { stroke: '#ffffff' }
+                });
+
                 return;
             }
 

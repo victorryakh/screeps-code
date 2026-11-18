@@ -8,8 +8,31 @@
 
 import { ROLE } from './constants';
 import { REMOTE_ROLES } from './strategy';
-import { bodyFor, bodyCost } from './utilities';
+import { bodyFor, bodyCost, rescueBodyFor } from './utilities';
 import { recordSpawn } from './metrics';
+import * as log from './log';
+
+/**
+ * Опции попытки спавна.
+ */
+export interface SpawnOptions {
+    /**
+     * Разрешено ли заказать **уменьшенное** тело, если обычное не влезает
+     * в запас спавна.
+     *
+     * @remarks
+     * Уменьшенное тело — это аварийный путь для комнаты, у которой не осталось
+     * ни одного рабочего крипа: в спавне лежит 250 энергий, а любое обычное
+     * тело стоит 300, и `spawnCreep` берёт энергию из самого спавна. Без
+     * аварийного пути такая комната не может заказать ни одного крипа никогда:
+     * спавн не регенерирует, пока энергии в комнате больше 300.
+     *
+     * В обычной работе уменьшенное тело недопустимо: спавн почти всегда
+     * неполон (он опустошается на каждом спавне и набирается заново), и бот
+     * заводил бы урезанных харвестеров вместо полноценных.
+     */
+    allowReducedBody?: boolean;
+}
 
 /**
  * Пытается создать крипа заданной роли в комнате. Алгоритм:
@@ -17,21 +40,26 @@ import { recordSpawn } from './metrics';
  *    спавн (`room.memory._spawnCooldown === Game.time`).
  * 2. Ищет свободный спавн (`!spawning`) в комнате.
  * 3. Подбирает тело через {@link bodyFor} и проверяет
- *    `room.energyAvailable >= bodyCost(body)`.
- * 4. Для ролей из {@link REMOTE_ROLES} требуется `Memory.targetRoom` —
+ *    `spawn.store.energy >= bodyCost(body)` — именно запас **спавна**:
+ *    `spawnCreep` берёт энергию из спавна, а не из комнаты.
+ * 4. Если тело не влезает и разрешён аварийный путь
+ *    ({@link SpawnOptions.allowReducedBody}) — подбирает уменьшенное тело
+ *    через {@link rescueBodyFor} и помечает крипа как спасательного.
+ * 5. Для ролей из {@link REMOTE_ROLES} требуется `Memory.targetRoom` —
  *    иначе спавн отменяется.
- * 5. Для `ROLE.HARVESTER` циклически выбирает источник комнаты по
+ * 6. Для `ROLE.HARVESTER` циклически выбирает источник комнаты по
  *    `room.memory._harvesterIndex`.
- * 6. Спавнит крипа; при успехе проставляет `_spawnCooldown = Game.time`.
+ * 7. Спавнит крипа; при успехе проставляет `_spawnCooldown = Game.time`.
  *
- * @param room Комната, в которой создаётся крип.
- * @param role Имя роли. Расширено до `string` ради совместимости с
- *             устаревшими данными в `Memory.creeps`; для неизвестных ролей
- *             {@link bodyFor} вернёт минимальное тело.
+ * @param room    Комната, в которой создаётся крип.
+ * @param role    Имя роли. Расширено до `string` ради совместимости с
+ *                устаревшими данными в `Memory.creeps`; для неизвестных ролей
+ *                {@link bodyFor} вернёт минимальное тело.
+ * @param options Опции попытки спавна (см. {@link SpawnOptions}).
  * @returns `true`, если спавн успешно поставлен в очередь; `false` в остальных
  *          случаях (кулдаун, нет спавна, не хватает энергии, ошибка `spawnCreep`).
  */
-export function trySpawn(room: Room, role: string): boolean {
+export function trySpawn(room: Room, role: string, options: SpawnOptions = {}): boolean {
     if (room.memory._spawnCooldown === Game.time) {
         return false;
     }
@@ -44,14 +72,66 @@ export function trySpawn(room: Room, role: string): boolean {
         return false;
     }
 
-    const body = bodyFor(role, room.controller?.level ?? 1);
+    let body = bodyFor(role);
 
     if (!body) {
         return false;
     }
 
-    if (spawn.room.energyAvailable < bodyCost(body)) {
-        return false;
+    const fullCost = bodyCost(body);
+    let cost = fullCost;
+    let reduced = false;
+
+    // `spawnCreep` берёт энергию **из спавна**, а не из комнаты: ёмкость
+    // хранилища спавна — 300 энергий. Поэтому проверять надо запас спавна,
+    // а не `room.energyAvailable` (спавн + расширения).
+    //
+    // Прежняя проверка по комнате создавала иллюзию, что крипа можно
+    // заказать: в E34S53 в комнате было 327 энергии, а апгрейдер стоил
+    // 350 — и бот сутки подряд пытался заказать апгрейдера, которого
+    // невозможно было создать ни при каком запасе. Тело дороже ёмкости
+    // спавна не создаётся вообще никогда.
+    if (spawn.store.energy < cost) {
+        // Аварийный путь: уменьшенное тело, которое влезает в то, что есть.
+        // Только когда рабочих в комнате не осталось — иначе спавн, который
+        // просто не успел наполниться, породил бы урезанных харвестеров.
+        const fallback = options.allowReducedBody
+            ? rescueBodyFor(role, spawn.store.energy)
+            : null;
+
+        if (!fallback) {
+            // Энергия в комнате есть, но она лежит в расширениях, а спавн
+            // их не видит. Это не «нет денег», это «деньги не там» — и
+            // сообщить об этом стоит, иначе комната выглядит платёжеспособной.
+            //
+            // Ключ дедупликации — постоянный: в тексте есть текущий запас
+            // спавна, и он меняется каждый тик, а значит обычный `warn`
+            // (который дедуплицируется по тексту) слал бы по письму на
+            // каждое новое значение.
+            if (spawn.room.energyAvailable >= cost) {
+                log.warnOnce(
+                    'spawn',
+                    `spawn-short|${room.name}|${role}`,
+                    `cannot spawn ${role} in ${room.name}: the spawn holds only ` +
+                    `${spawn.store.energy} of ${cost} energy — the rest sits in ` +
+                    'extensions, and spawnCreep only draws from the spawn itself'
+                );
+            }
+
+            return false;
+        }
+
+        body = fallback;
+        cost = bodyCost(body);
+        reduced = true;
+
+        log.warnOnce(
+            'spawn',
+            `emergency-body|${room.name}|${role}`,
+            `emergency body for ${role} in ${room.name}: the spawn holds only ` +
+            `${spawn.store.energy} of ${fullCost} energy, so a reduced body ` +
+            `(${cost}) was ordered to restart the colony`
+        );
     }
 
     const name = `${role}_${Game.time}_${Math.floor(Math.random() * 1000)}`;
@@ -60,6 +140,10 @@ export function trySpawn(room: Room, role: string): boolean {
         role: role,
         homeRoom: room.name
     };
+
+    if (reduced) {
+        memory.rescue = true;
+    }
 
     if (REMOTE_ROLES.indexOf(role as (typeof REMOTE_ROLES)[number]) !== -1) {
         if (!Memory.targetRoom) {
@@ -101,7 +185,7 @@ export function trySpawn(room: Room, role: string): boolean {
  * @returns `true`, если `room.energyCapacityAvailable >= bodyCost(bodyFor(role))`.
  */
 export function canAffordBody(room: Room, role: string): boolean {
-    const body = bodyFor(role, room.controller?.level ?? 1);
+    const body = bodyFor(role);
 
     if (!body) {
         return false;

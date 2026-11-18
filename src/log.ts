@@ -89,7 +89,7 @@ function format(scope: string, level: LogLevel, msg: string, data: unknown): str
  * тиков для одного ключа `level|scope|msg`. При переполнении кэша
  * `Memory._notified` сверх `NOTIFY_MAX_ENTRIES` записи старше TTL удаляются.
  */
-function notifyOnce(scope: string, level: LogLevel, msg: string): void {
+function notifyOnce(scope: string, level: LogLevel, msg: string, notifyMsg?: string): void {
     if (typeof Game.notify !== 'function') {
         return;
     }
@@ -117,7 +117,7 @@ function notifyOnce(scope: string, level: LogLevel, msg: string): void {
         }
     }
 
-    Game.notify(`[${level}] ${scope}: ${msg}`, NOTIFY_DEDUP_TTL);
+    Game.notify(`[${level}] ${scope}: ${notifyMsg ?? msg}`, NOTIFY_DEDUP_TTL);
 }
 
 /**
@@ -135,6 +135,35 @@ function emit(level: LogLevel, scope: string, msg: string, data?: unknown): void
     if (level === 'error' || level === 'warn') {
         notifyOnce(scope, level, msg);
     }
+}
+
+/**
+ * Логирует предупреждение с **постоянным** ключом дедупликации.
+ *
+ * @remarks
+ * Обычный {@link warn} дедуплицируется по тексту сообщения. Это не годится
+ * для сообщений, в текст которых входит счётчик тиков: каждое такое сообщение
+ * — новый ключ, дедупликация не работает никогда, а `Memory._notified`
+ * растёт (и каждая запись — новое письмо на почту).
+ *
+ * В E34S53 сторож контроллера писал «не прогрессирует уже N тиков» каждые
+ * 50 тиков: за полтора часа в `Memory._notified` накопилось 157 записей, и
+ * каждая была отдельным уведомлением.
+ *
+ * @param scope Метка подсистемы.
+ * @param key   Постоянный ключ: сообщения с одним ключом дедуплицируются
+ *              между собой, как бы их текст ни отличался.
+ * @param msg   Текст сообщения (в уведомление уходит как есть).
+ * @param data  Опциональный контекст.
+ */
+export function warnOnce(scope: string, key: string, msg: string, data?: unknown): void {
+    if (!shouldEmit('warn')) {
+        return;
+    }
+
+    console.log(format(scope, 'warn', msg, data));
+
+    notifyOnce(scope, 'warn', key, msg);
 }
 
 /**

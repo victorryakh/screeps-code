@@ -26,9 +26,10 @@ import {
     EXTENSION_BUILD_COST,
     EXTENSION_PAYBACK_TICKS,
     CONTAINER_BUILD_COST,
+    TOWER_BUILD_COST,
+    TOWER_RANGE,
     DELIVERY_STRUCTURE_CHECK_INTERVAL,
     BUILDER_RESERVE_ENERGY,
-    BUILDER_TRIP_ENERGY,
     DELIVERY_BUILD_HORIZON_TICKS,
     CONTROLLER_STALL_TICKS,
     CONTROLLER_WATCH_INTERVAL
@@ -114,17 +115,23 @@ export function run(room: Room): void {
     }
 
     ensureDeliveryStructures(room);
+    ensureDefenseTowers(room);
 
     ensureSpawn(room);
     ensureSpawnAccessible(room);
     ensureSpawnRingReserve(room);
 
+    ensureBirthExit(room);
+
     // Площадки расширений, которые комната не оправдывает, снимаются
-    // после разбора кольца рождения: кольцо важнее — там спавн, и его
-    // разблокировка может потребовать снести постройку.
+    // после разбора кольца рождения и выхода из него: кольцо и выход важнее —
+    // там спавн, и его разблокировка может потребовать снести постройку.
+    //
+    // Порядок важен ещё и потому, что площадка расширения занимает клетку
+    // (движок не пускает по ней крипа) и может перекрыть коридор к спавну.
+    // Снятая площадка открывает путь, которого раньше не было.
     cancelUnaffordableExtensionSites(room, layout.maxExtensions);
 
-    ensureBirthExit(room);
     ensureCreepsNotBlocking(room);
     updateSourceSaturation(room, counts);
     updateIncomeRate(room);
@@ -143,14 +150,59 @@ export function run(room: Room): void {
         collectHarvestSlotKeys(room).size
     );
 
+    // Роли, которых комнате не хватает прямо сейчас.
+    //
+    // Пока список не пуст, комнате нужно заказать крипа, и энергию надо
+    // нести в спавн: `spawnCreep` берёт её только из самого спавна, и энергия
+    // в расширениях до спавна не дотягивается. Но когда список пуст, спавн
+    // комнате не нужен: энергия, сданная в него, просто лежит (ёмкость
+    // спавна — 300, а крипов комната больше не заказывает), а расширения рядом
+    // с клетками добычи пустуют. Тогда харвестеры носят энергию через
+    // полкомнаты вместо одного шага, и доход падает.
+    //
+    // В E34S53 (18.11.2026) список был пуст: бюджет комнаты (2.44 энергии в
+    // тик) не позволял завести ни билдера, ни ремонтника, а харвестеры всё
+    // равно сдавали энергию в спавн, который был заполнен на 250 из 300 и
+    // никогда не доходил до 300 — то есть крипа комната заказать не могла.
+    const pendingRoles = spawnOrder
+        .filter(([role, targetCount]) => (counts[role] || 0) < targetCount)
+        .map(([role]) => role);
+
+    if (pendingRoles.length > 0) {
+        room.memory._pendingSpawnRoles = pendingRoles;
+    } else {
+        delete room.memory._pendingSpawnRoles;
+    }
+
     markExcessWorkers(room, homeCreeps, spawnOrder);
+
+    // Аварийный путь: если в комнате не осталось ни одного харвестера,
+    // спавну можно заказать уменьшенное тело.
+    //
+    // Обычное тело харвестера стоит 300 энергий — ровно столько, сколько
+    // вмещает спавн. Если в спавне 250, а остальные 400 лежат в расширениях,
+    // комната не может заказать ни одного крипа: `spawnCreep` берёт энергию
+    // из самого спавна, а спавн не регенерирует, пока энергии в комнате
+    // больше 300. Такой комнате нужен крип дешевле — любой ценой.
+    //
+    // Условие — именно «нет харвестера», а не «нет рабочего вообще».
+    // Энергию в комнате производит **только харвестер**: апгрейдер, билдер и
+    // ремонтник её потребляют. Комната, где остался один билдер, энергию не
+    // производит и без харвестера не оживёт — а условие «нет рабочих» её
+    // блокировало: аварийный крип так и не появлялся, пока билдер не умирал
+    // от старости (до 1500 тиков простоя при незаполненном спавне).
+    //
+    // Пока харвестер есть, уменьшенное тело недопустимо: спавн опустошается
+    // на каждом спавне и набирается заново, и бот заводил бы урезанных
+    // харвестеров вместо полноценных.
+    const harvesterCount = counts[ROLE.HARVESTER] || 0;
 
     for (const pair of spawnOrder) {
         const role = pair[0];
         const targetCount = pair[1];
 
         if ((counts[role] || 0) < targetCount) {
-            if (trySpawn(room, role)) {
+            if (trySpawn(room, role, { allowReducedBody: harvesterCount === 0 })) {
                 // Не больше одного крипа за тик.
                 break;
             }
@@ -776,8 +828,8 @@ function ensureDeliveryStructures(room: Room): void {
 }
 
 /**
- * Может ли билдер работать: хватает ли комнате энергии на саму стройку,
- * сохранив запас для рабочих.
+ * Может ли билдер работать: есть ли в комнате энергия, которую ему можно
+ * отдать, не съедая запас рабочих.
  *
  * @remarks
  * Сравнивать надо с тем, что билдер увозит за один заход, а не с полной
@@ -788,9 +840,19 @@ function ensureDeliveryStructures(room: Room): void {
  * стоял и ждал, не построив ничего: колония платила за крипа, который не
  * делал работы.
  *
- * Площадка набирает прогресс за несколько заходов, поэтому «может ли
- * билдер работать» — это «хватает ли энергии на один заход плюс запас для
- * апгрейдера».
+ * **Спавн в счёт не идёт.** Это не «формальность», а причина заморозки
+ * билдера в E34S53 (18.11.2026): спавн — фабрика крипов, и энергия из него
+ * уходит на замену умирающих рабочих. Условие «в комнате (спавн плюс
+ * расширения) есть 400 энергий» требовало от спавна 300, а спавн без
+ * единого крипа в запасе не может опустеть — и условие не выполнялось
+ * никогда. Билдер помечался «лишним», не брал энергию из структур и стоял
+ * на месте все 1500 тиков своей жизни: площадка контейнера не двигалась
+ * (3437 из 5000), а 300 энергий каждые 1500 тиков уходили на крипа, который
+ * не делал ничего.
+ *
+ * Правильный вопрос — «есть ли у комнаты банк, из которого билдер может
+ * взять груз, не трогая фабрику крипов». Банк комнаты — расширения,
+ * хранилище и контейнер; спавн — нет.
  *
  * @param room Комната.
  * @returns `true`, если билдеру можно брать энергию из структур.
@@ -818,9 +880,183 @@ function builderCanWork(room: Room): boolean {
     }
 
     // Один заход билдера: столько энергии он увозит с собой за раз.
-    const trip = Math.min(remaining, BUILDER_TRIP_ENERGY);
+    // Банк комнаты: расширения, хранилище, контейнер. Спавн — не банк:
+    // это фабрика крипов, и энергия из него нужна на замену умирающих
+    // рабочих (см. `findEnergyDonor`).
+    const bank = room.find(FIND_STRUCTURES, {
+        filter: (s): s is AnyStoreStructure =>
+            s.structureType !== STRUCTURE_SPAWN &&
+            s.structureType !== STRUCTURE_TOWER &&
+            'store' in s &&
+            (s as AnyStoreStructure).store.energy > 0
+    });
 
-    return room.energyAvailable >= trip + BUILDER_RESERVE_ENERGY;
+    return bank.length > 0;
+}
+
+/**
+ * Планирует башни для обороны от вторгателей.
+ *
+ * @remarks
+ * Вторгатели — единственная причина, по которой колония может лишиться
+ * всех рабочих разом. В E34S53 14.11.2026 они вырезали харвестеров у
+ * спавна (в комнате остался чужой томбоун рядом со спавном, а контейнер,
+ * которому было 90 000 из 250 000 хитов, разрушили), и комната осталась с
+ * одним билдером: спавн опустел, доход упал, контроллер перестал расти.
+ *
+ * Башня ставится **на клетку доставки рядом с клеткой добычи**:
+ * - харвестер сдаёт в неё энергию в один шаг (значит, башня сыта);
+ * - она накрывает спавн (расстояние до него ≤ `TOWER_RANGE`) и подходы к
+ *   нему, то есть стреляет по вторгателям именно там, где они вредят.
+ *
+ * Клетки добычи и кольцо рождения занимать нельзя: башня на клетке добычи
+ * отнимает её у харвестеров, а на кольце — закрывает рождение крипов.
+ *
+ * Заказ — только если комната доведёт башню до конца (см.
+ * {@link canFundDeliveryStructure}).
+ *
+ * @param room Комната.
+ */
+function ensureDefenseTowers(room: Room): void {
+    const controller = room.controller;
+
+    if (!controller || controller.level < 3) {
+        return;
+    }
+
+    if (
+        room.memory._towerCheckTick &&
+        Game.time - room.memory._towerCheckTick < EXTENSION_CHECK_INTERVAL
+    ) {
+        return;
+    }
+
+    room.memory._towerCheckTick = Game.time;
+
+    const limit = CONTROLLER_STRUCTURES[STRUCTURE_TOWER]?.[controller.level] ?? 0;
+
+    if (!limit) {
+        return;
+    }
+
+    const built = room.find(FIND_MY_STRUCTURES, {
+        filter: (s) => s.structureType === STRUCTURE_TOWER
+    }).length;
+
+    const sites = room.find(FIND_MY_CONSTRUCTION_SITES, {
+        filter: (s) => s.structureType === STRUCTURE_TOWER
+    }).length;
+
+    if (built + sites >= limit) {
+        return;
+    }
+
+    if (!canFundDeliveryStructure(room, TOWER_BUILD_COST)) {
+        return;
+    }
+
+    const spot = findTowerSpot(room);
+
+    if (!spot) {
+        return;
+    }
+
+    const result = room.createConstructionSite(spot.x, spot.y, STRUCTURE_TOWER);
+
+    if (result === OK) {
+        log.info(
+            'room',
+            `planned a tower at ${spot.x},${spot.y} in ${room.name} — the room has no defence against invaders`
+        );
+    }
+}
+
+/**
+ * Ищет клетку для башни: свободную, проходимую, не клетку добычи и не
+ * кольцо рождения, в пределах досягаемости спавна.
+ *
+ * @param room Комната.
+ * @returns Клетка или `null`.
+ */
+function findTowerSpot(room: Room): RoomPosition | null {
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+
+    if (!spawn) {
+        return null;
+    }
+
+    const occupied = new Set<string>();
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const s of room.find(FIND_MY_CONSTRUCTION_SITES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    const harvestSlots = collectHarvestSlotKeys(room);
+    const ring = ringTileKeysOf(spawn);
+    const terrain = room.getTerrain();
+
+    let best: RoomPosition | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const key of collectDeliveryTileKeys(room)) {
+        const [x, y] = key.split(',').map(Number);
+
+        if (x === undefined || y === undefined) {
+            continue;
+        }
+
+        if (occupied.has(key) || harvestSlots.has(key) || ring.has(key)) {
+            continue;
+        }
+
+        if (terrain.get(x, y) === WALL_TERRAIN) {
+            continue;
+        }
+
+        // Башня должна доставать до спавна — иначе она не защищает то
+        // место, ради которого затевается.
+        const distance = Math.max(
+            Math.abs(x - spawn.pos.x),
+            Math.abs(y - spawn.pos.y)
+        );
+
+        if (distance > TOWER_RANGE) {
+            continue;
+        }
+
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = new RoomPosition(x, y, room.name);
+        }
+    }
+
+    return best;
+}
+
+/**
+ * Клетки кольца рождения вокруг спавна (восемь соседей).
+ *
+ * @param spawn Спавн.
+ * @returns Множество ключей `"x,y"`.
+ */
+function ringTileKeysOf(spawn: StructureSpawn): Set<string> {
+    const keys = new Set<string>();
+
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            if (dx === 0 && dy === 0) {
+                continue;
+            }
+
+            keys.add(`${spawn.pos.x + dx},${spawn.pos.y + dy}`);
+        }
+    }
+
+    return keys;
 }
 
 /**
@@ -889,7 +1125,7 @@ function runTowers(room: Room, defense: { attackHostiles: boolean; healInjured: 
  * @param ring Снимок состояния кольца.
  * @returns `true`, если площадка снята.
  */
-function freeBirthTileByRemovingSite(ring: SpawnRingInfo): boolean {
+function freeBirthTileByRemovingSite(ring: SpawnRingInfo, roomName: string): boolean {
     for (const site of ring.birthSites) {
         const remove = (site as ConstructionSite & { remove?: () => number }).remove;
 
@@ -898,8 +1134,9 @@ function freeBirthTileByRemovingSite(ring: SpawnRingInfo): boolean {
         }
 
         if (remove.call(site) === OK) {
-            log.warn(
+            log.warnOnce(
                 'room',
+                `removed-site-on-ring|${roomName}|${site.pos.x},${site.pos.y}`,
                 `removed construction site at ${site.pos.x},${site.pos.y} — a site on ` +
                 'the birth ring holds that tile forever'
             );
@@ -922,7 +1159,7 @@ function freeBirthTileByRemovingSite(ring: SpawnRingInfo): boolean {
  * @param ring Снимок состояния кольца.
  * @returns `true`, если расширение снесено.
  */
-function freeBirthTileByDestroyingEmptyExtension(ring: SpawnRingInfo): boolean {
+function freeBirthTileByDestroyingEmptyExtension(ring: SpawnRingInfo, roomName: string): boolean {
     const empty = ring.adjacentExtensions
         .filter((e) => e.store.energy === 0)
         .sort((a, b) => (a.pos.x - b.pos.x) || (a.pos.y - b.pos.y));
@@ -934,8 +1171,9 @@ function freeBirthTileByDestroyingEmptyExtension(ring: SpawnRingInfo): boolean {
     }
 
     if (target.destroy() === OK) {
-        log.warn(
+        log.warnOnce(
             'room',
+            `destroyed-empty-extension|${roomName}|${target.pos.x},${target.pos.y}`,
             `destroyed empty extension at ${target.pos.x},${target.pos.y} — it held a ` +
             'birth tile and stored nothing'
         );
@@ -956,7 +1194,7 @@ function freeBirthTileByDestroyingEmptyExtension(ring: SpawnRingInfo): boolean {
  * @param ring Снимок состояния кольца.
  * @returns `true`, если расширение снесено.
  */
-function freeBirthTileByDestroyingExtension(ring: SpawnRingInfo): boolean {
+function freeBirthTileByDestroyingExtension(ring: SpawnRingInfo, roomName: string): boolean {
     const target = ring.adjacentExtensions
         .slice()
         .sort((a, b) => a.store.energy - b.store.energy)[0];
@@ -966,8 +1204,9 @@ function freeBirthTileByDestroyingExtension(ring: SpawnRingInfo): boolean {
     }
 
     if (target.destroy() === OK) {
-        log.warn(
+        log.warnOnce(
             'room',
+            `destroyed-extension|${roomName}|${target.pos.x},${target.pos.y}`,
             `destroyed extension at ${target.pos.x},${target.pos.y}: only ` +
             `${ring.freeTilesWithoutCreeps} birth tile(s) left around the spawn`
         );
@@ -1040,7 +1279,7 @@ function ensureSpawnRingReserve(room: Room): void {
         }
 
         // Стройплощадка на кольце — клетка, потерянная навсегда.
-        if (freeBirthTileByRemovingSite(ring)) {
+        if (freeBirthTileByRemovingSite(ring, room.name)) {
             continue;
         }
 
@@ -1060,8 +1299,9 @@ function ensureSpawnRingReserve(room: Room): void {
             const moved = moveCreepsOffBirthTiles(room, spawn, ring, needed);
 
             if (moved > 0) {
-                log.warn(
+                log.warnOnce(
                     'room',
+                    `moved-off-ring|${room.name}|${spawn.name}`,
                     `moved ${moved} creep(s) off the birth ring of spawn ${spawn.name} ` +
                     `in ${room.name}: only ${ring.freeTiles.length} free birth tile(s) left`
                 );
@@ -1072,14 +1312,14 @@ function ensureSpawnRingReserve(room: Room): void {
 
         // Пустое расширение на кольце держит клетку вхолостую: энергии в
         // нём нет, а клетку рождения оно блокирует.
-        if (freeBirthTileByDestroyingEmptyExtension(ring)) {
+        if (freeBirthTileByDestroyingEmptyExtension(ring, room.name)) {
             continue;
         }
 
         // Последний довод: сносим расширение с наименьшим запасом —
         // постройка на расстоянии вытяжки от спавна того же стоит, а вот
         // запечатанный спавн не лечится сам.
-        freeBirthTileByDestroyingExtension(ring);
+        freeBirthTileByDestroyingExtension(ring, room.name);
     }
 }
 
@@ -1267,8 +1507,20 @@ function affordableExtensions(room: Room, counts: Record<string, number>): numbe
     const income = effectiveIncome(room, counts);
 
     if (income <= 0) {
-        // Дохода нет совсем — ограничивать нечем.
-        return Number.POSITIVE_INFINITY;
+        // Дохода нет совсем — комната не может оправдать **ни одного**
+        // расширения.
+        //
+        // Раньше здесь возвращался `Infinity`: «ограничивать нечем». Это было
+        // ровно наоборот — ограничение снималось в тот самый момент, когда
+        // комната была беднее всего. Планировщик заказывал расширения по
+        // лимиту RCL, а `cancelUnaffordableExtensionSites` при `Infinity`
+        // выходил сразу и ничего не снимал. В E34S53 так накопилось 11
+        // расширений и ещё 18 площадок — 54 000 энергии работы, которые
+        // комната не зарабатывает даже за 27 000 тиков, и которые занимают
+        // клетки, время билдера и лимит RCL.
+        //
+        // Ноль дохода — это тоже ответ: «ничего не заказывай».
+        return 0;
     }
 
     const affordable = Math.floor(
@@ -1300,6 +1552,15 @@ function affordableExtensions(room: Room, counts: Record<string, number>): numbe
  *   переданную энергию нельзя посчитать как разницу `store` внутри одного
  *   тика — она всегда нулевая.
  *
+ * **Уровень источника читается каждый тик, а не раз в 25.** Иначе весь сток
+ * между регенерацией и замером теряется: на уровне регенерации стоит 3000, а
+ * не то, что было до неё, и если за 25 тиков до регенерации уровень упал
+ * ровно на столько же, сколько набрал после, — два замера показывают одно и
+ * то же значение, и добыча не видна вообще. В E34S53 это стоило 0.73 энергии
+ * в тик измеренного дохода (4.72 против фактических 5.45), а бюджет комнаты
+ * считается именно по замеру: чем меньше измеренный доход, тем меньше
+ * рабочих комната себе позволяет.
+ *
  * @param room Комната.
  */
 function updateIncomeRate(room: Room): void {
@@ -1310,12 +1571,39 @@ function updateIncomeRate(room: Room): void {
     }
 
     const now = Game.time;
+    const current = source.energy;
     const lastTick = room.memory._incomeSampleTick;
-    const lastEnergy = room.memory._incomeSampleEnergy;
 
-    if (lastTick === undefined || lastEnergy === undefined) {
+    // Сток накапливается ПО ТИКУ: каждый тик сравниваем уровень источника с
+    // предыдущим чтением.
+    //
+    // - Уровень упал → сток равен падению.
+    // - Уровень вырос → это регенерация одним куском (движок ставит 3000 в
+    //   начале тика, потом отнимает добычу этого тика). Сток после
+    //   регенерации — это 3000 минус текущий уровень, а сток ДО регенерации
+    //   уже посчитан на прошлом тике: уровень прошлого чтения и есть уровень
+    //   перед регенерацией.
+    //
+    // Читать уровень раз в 25 тиков нельзя: на уровне регенерации стоит
+    // 3000, а не то, что было до неё. Если за 25 тиков до регенерации уровень
+    // упал ровно на столько же, сколько набрал после, — два замера показывают
+    // одно и то же значение и добыча не видна вообще.
+    const prev = room.memory._sourceEnergy;
+
+    if (prev !== undefined && prev !== current) {
+        const drained =
+            current < prev
+                ? prev - current
+                : Math.max(0, SOURCE_ENERGY_CAPACITY - current);
+
+        room.memory._harvested = (room.memory._harvested ?? 0) + drained;
+    }
+
+    room.memory._sourceEnergy = current;
+
+    if (lastTick === undefined) {
         room.memory._incomeSampleTick = now;
-        room.memory._incomeSampleEnergy = source.energy;
+        room.memory._incomeSampleEnergy = current;
         room.memory._incomeWindowTick = now;
         room.memory._harvested = 0;
         return;
@@ -1325,24 +1613,8 @@ function updateIncomeRate(room: Room): void {
         return;
     }
 
-    const current = source.energy;
-
     room.memory._incomeSampleTick = now;
     room.memory._incomeSampleEnergy = current;
-
-    // Источник восстанавливается сразу целиком: за один тик его энергия
-    // прыгает с нуля (или с любого остатка) до 3000. Поэтому «сколько
-    // убавилось» между двумя замерами — не всегда «сколько добыли».
-    //
-    // Если энергия источника выросла, значит между замерами был скачок
-    // регенерации, и добыто было 3000 минус остаток. Раньше такие замеры
-    // просто отбрасывались, а это как раз те замеры, где добычи больше
-    // всего: доход комнаты занижался вдвое, бюджет не покрывал и одного
-    // апгрейдера, и колония жила в долг.
-    const harvested =
-        current > lastEnergy
-            ? Math.max(0, SOURCE_ENERGY_CAPACITY - current)
-            : Math.max(0, lastEnergy - current);
 
     // Окно накопления начинается с прошлого замера, а не с текущего
     // момента: иначе первое же деление даёт «добычу за один тик» и доход
@@ -1357,8 +1629,6 @@ function updateIncomeRate(room: Room): void {
     }
 
     const windowStart = room.memory._incomeWindowTick;
-
-    room.memory._harvested = (room.memory._harvested ?? 0) + harvested;
 
     const window = now - windowStart;
 
@@ -1431,8 +1701,9 @@ function watchControllerProgress(room: Room): void {
         return;
     }
 
-    log.warn(
+    log.warnOnce(
         'room',
+        `controller-stalled|${room.name}`,
         `controller of ${room.name} has not progressed for ${stalled} ticks ` +
         `(progress ${progress}, downgrade in ${controller.ticksToDowngrade} ticks) — ` +
         'the upgrader is probably stuck without energy'
@@ -1562,8 +1833,9 @@ function ensureSpawnAccessible(room: Room): void {
 
         if (!sealedSince) {
             room.memory._sealedSpawnTick = Game.time;
-            log.warn(
+            log.warnOnce(
                 'room',
+                `sealed-spawn|${room.name}|${spawn.name}`,
                 `spawn ${spawn.name} in ${room.name} is sealed — the engine cannot place ` +
                 `new creeps, the colony is idle. Blocked by ${ring.birthTiles.length - ring.freeTiles.length} ` +
                 'birth tile(s); the bot will free a cell shortly.'
@@ -1590,8 +1862,9 @@ function ensureSpawnAccessible(room: Room): void {
             room.memory._sealedSpawnTick = Game.time;
             room.memory._sealedSpawnHealTick = Game.time;
 
-            log.warn(
+            log.warnOnce(
                 'room',
+                `blocked-by-creeps|${room.name}|${spawn.name}`,
                 `spawn ${spawn.name} in ${room.name} is blocked by ` +
                 `${ring.creepsOnBirthTiles.length} of our creeps on the birth ring — ` +
                 `${moved} moved away`
@@ -1604,14 +1877,14 @@ function ensureSpawnAccessible(room: Room): void {
         // держат клетку и не освободят её никогда (достроенное расширение
         // занимало бы ту же клетку). Потом сносим одно расширение — по
         // одному, а не все сразу: ёмкость комнаты нужна ей самой.
-        if (freeBirthTileByRemovingSite(ring)) {
+        if (freeBirthTileByRemovingSite(ring, room.name)) {
             room.memory._sealedSpawnTick = Game.time;
             room.memory._sealedSpawnHealTick = Game.time;
 
             continue;
         }
 
-        if (freeBirthTileByDestroyingEmptyExtension(ring)) {
+        if (freeBirthTileByDestroyingEmptyExtension(ring, room.name)) {
             room.memory._sealedSpawnTick = Game.time;
             room.memory._sealedSpawnHealTick = Game.time;
 
@@ -1619,7 +1892,7 @@ function ensureSpawnAccessible(room: Room): void {
         }
 
         if (ring.adjacentExtensions.length > 0) {
-            freeBirthTileByDestroyingExtension(ring);
+            freeBirthTileByDestroyingExtension(ring, room.name);
 
             room.memory._sealedSpawnTick = Game.time;
             room.memory._sealedSpawnHealTick = Game.time;
