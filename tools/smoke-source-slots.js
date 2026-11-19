@@ -264,7 +264,16 @@ function makeRoom(opts) {
                 return -6; // ERR_NOT_ENOUGH_ENERGY
             }
             spawnAttempts.push({ name, role: opts && opts.memory ? opts.memory.role : '?', cost });
-            spawn.store.energy -= cost;
+            let remaining = cost;
+
+            for (const structure of [spawn, ...extensions]) {
+                if (remaining <= 0) {
+                    break;
+                }
+                const taken = Math.min(remaining, structure.store.energy);
+                structure.store.energy -= taken;
+                remaining -= taken;
+            }
             const role = opts && opts.memory ? opts.memory.role : 'harvester';
             const creep = makeCreep(19, 25, role, 0);
             creep.name = name;

@@ -298,14 +298,27 @@ function makeRoom(opts) {
         spawning: null, room: null,
         spawnCreep(body, name, opts) {
             const cost = body.reduce((sum, part) => sum + (BODYPART_COST[part] || 0), 0);
-            // The engine draws the energy from the SPAWN's own store, not
-            // from the room: the spawn holds at most 300 energy, so a body
-            // that costs more can never be created.
-            if (spawn.store.energy < cost) {
+            // The engine draws the energy from the WHOLE ROOM: the check is
+            // against `room.energyAvailable` and the charge walks the spawns
+            // first, then the extensions ("The required energy amount can be
+            // withdrawn from all spawns and extensions in the room").
+            const pool = [spawn, ...extensions];
+            const available = pool.reduce((sum, s) => sum + s.store.energy, 0);
+
+            if (available < cost) {
                 return -6; // ERR_NOT_ENOUGH_ENERGY
             }
             spawnAttempts.push({ name, role: opts && opts.memory ? opts.memory.role : '?', cost, body: body.slice() });
-            spawn.store.energy -= cost;
+            let remaining = cost;
+
+            for (const structure of pool) {
+                if (remaining <= 0) {
+                    break;
+                }
+                const taken = Math.min(remaining, structure.store.energy);
+                structure.store.energy -= taken;
+                remaining -= taken;
+            }
             const role = opts && opts.memory ? opts.memory.role : 'harvester';
             const creep = makeCreep(19, 25, role, 0);
             creep.name = name;
@@ -842,10 +855,10 @@ function actions(creep, kind) {
 
 // --- Scenario 11: the spawn is fed before the extensions ------------------
 // The extension next to the harvest tile (21,24) holds only 10 free energy,
-// the spawn is empty. The spawn is the only place where the room's energy
-// becomes creeps: `spawnCreep` draws it from the spawn itself and never
-// looks at the extensions. So an empty spawn has to be filled first, even
-// though the extension is one step away and the spawn is ten.
+// the spawn is empty. The spawn is the place where the room's energy becomes
+// creeps, and `spawnCreep` spends the spawn first - so an empty spawn has to
+// be filled first, even though the extension is one step away and the spawn
+// is ten.
 //
 // Before the fix the room starved exactly this way: the harvesters filled
 // the extensions (including the far ones, which are useless - nothing brings
@@ -1146,9 +1159,11 @@ function actions(creep, kind) {
 // on swamp it spent more time walking than upgrading - and the controller
 // stood still for dozens of ticks at a time.
 // --- Scenario 17: every body fits the spawn's energy capacity -------------
-// `spawnCreep` draws the energy from the SPAWN itself, and the spawn's
-// store holds 300 energy. A body that costs more than that can never be
-// created, no matter how much energy the room has.
+// `spawnCreep` draws the energy from the whole room, but the SPAWN's own
+// store holds 300 energy and it is the spawn that pays first. A body that
+// costs more than the spawn can hold can only be paid for by the extensions,
+// and only if they happen to be full - a body the room cannot rely on. So
+// every body the bot orders must fit into 300.
 //
 // The upgrader used to be [WORK, WORK, CARRY, MOVE, MOVE] = 350: it could
 // never be spawned, in any room, ever - and the colony ran for days on
@@ -1297,10 +1312,11 @@ function actions(creep, kind) {
 }
 
 // --- Scenario 21: the builder never takes energy from the spawn -----------
-// The spawn is the creep factory: `spawnCreep` draws energy from the spawn
-// itself, and the energy there is what the room spends on replacing the
-// workers that die of old age every 1500 ticks. The builder must not
-// compete with that.
+// The spawn is the creep factory: `spawnCreep` spends the spawn first, so
+// what lies in it is what the room pays for replacing the workers that die
+// of old age every 1500 ticks. The builder must not compete with that - and
+// the extensions next to the harvest tiles are exactly where the builder's
+// energy belongs.
 //
 // The old rule ("the room needs a backpack plus a 300 reserve in total")
 // froze the builder in E34S53 forever: `room.energyAvailable` is the spawn

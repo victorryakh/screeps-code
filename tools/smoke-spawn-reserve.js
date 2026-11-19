@@ -1,21 +1,30 @@
 /* Offline smoke test for the spawn reserve of the bot bundle.
  *
- * Reproduces the failure that killed the colony in E34S53 on 2026-11-13:
- * the spawn held 250 of 300 energy, the extensions held 400 more, and the
- * room had no creeps at all.
+ * Reproduces the failure that killed the colony in E34S53: the room had no
+ * creeps at all and the bot refused to order a replacement.
  *
- * The trap is the engine rule "a spawn regenerates 1 energy per tick while
- * the room holds less than 300 energy in spawns and extensions". With 650
- * energy in the room the spawn never regenerates, and `spawnCreep` draws the
- * energy from the SPAWN itself - so a 300-energy body can never be ordered
- * and the room is dead for good.
+ * The engine rule that matters: `spawnCreep` draws the energy from the WHOLE
+ * ROOM - "The required energy amount can be withdrawn from all spawns and
+ * extensions in the room" - so affordability is `room.energyAvailable`, not
+ * the spawn's own store. The bot used to check the spawn's store, refused to
+ * order a creep the engine would have accepted, and on 2026-11-19 that left
+ * E34S53 with zero creeps: 104 energy in the spawn, 200 in the extensions,
+ * 304 in the room - exactly one harvester - and the bot could not see it.
+ *
+ * The second engine rule: a spawn regenerates 1 energy per tick while the
+ * room holds less than 300 energy in spawns and extensions. That is the
+ * engine's own bootstrap: a room with no creeps and less than 300 energy
+ * refills itself.
  *
  * Checks:
- *   1. a room without workers gets a reduced body that fits the spawn;
- *   2. a room that still has workers never gets a reduced body;
- *   3. the harvester feeds the spawn before the extensions;
- *   4. extension sites the room cannot pay for are removed;
- *   5. the controller-stall warning keeps one stable dedup key.
+ *   1. a room without workers gets a harvester - paid for by the energy of
+ *      the whole room, not only by the spawn's own store;
+ *   2. a room whose total energy cannot pay for a full body falls back to the
+ *      reduced ladder, down to the 100-energy loader;
+ *   3. a room that still has workers never gets a reduced body;
+ *   4. the harvester feeds the spawn before the extensions;
+ *   5. extension sites the room cannot pay for are removed;
+ *   6. the controller-stall warning keeps one stable dedup key.
  *
  * Usage:
  *   bun run build && node tools/smoke-spawn-reserve.js
@@ -291,10 +300,14 @@ function makeRoom(opts) {
         spawning: null, room: null,
         spawnCreep(body, name, opts) {
             const cost = body.reduce((sum, part) => sum + (BODYPART_COST[part] || 0), 0);
-            // The engine draws the energy from the SPAWN's own store, not
-            // from the room: the spawn holds at most 300 energy, so a body
-            // that costs more can never be created.
-            if (spawn.store.energy < cost) {
+            // The engine draws the energy from the WHOLE ROOM: the check is
+            // against `room.energyAvailable` and the charge walks the spawns
+            // first, then the extensions ("The required energy amount can be
+            // withdrawn from all spawns and extensions in the room").
+            const pool = [spawn, ...extensions];
+            const available = pool.reduce((sum, s) => sum + s.store.energy, 0);
+
+            if (available < cost) {
                 return -6; // ERR_NOT_ENOUGH_ENERGY
             }
             spawnAttempts.push({
@@ -304,7 +317,16 @@ function makeRoom(opts) {
                 body: body.slice(),
                 memory: (opts && opts.memory) || null
             });
-            spawn.store.energy -= cost;
+            let remaining = cost;
+
+            for (const structure of pool) {
+                if (remaining <= 0) {
+                    break;
+                }
+                const taken = Math.min(remaining, structure.store.energy);
+                structure.store.energy -= taken;
+                remaining -= taken;
+            }
             const role = opts && opts.memory ? opts.memory.role : 'harvester';
             const creep = makeCreep(19, 25, role, 0);
             creep.name = name;
@@ -409,6 +431,29 @@ const DEAD_ROOM = {
     ]
 };
 
+// The state of E34S53 on 2026-11-19, when the colony finally died: 104 energy
+// in the spawn, 200 in four extensions, 304 in the room - exactly one
+// harvester - and no creeps at all. The bot used to refuse to order the
+// harvester, because it looked at the spawn's store alone.
+const DEAD_ROOM_19_11 = {
+    spawnEnergy: 104,
+    extensions: [
+        [18, 27, 0], [18, 26, 0], [21, 26, 0], [20, 28, 0], [18, 28, 50],
+        [19, 28, 0], [17, 27, 0], [17, 26, 0], [20, 25, 50], [21, 24, 50], [21, 25, 50]
+    ]
+};
+
+// A poor room: 150 energy in total. Not even the cheapest harvester fits, but
+// the 100-energy loader does - and the loader is enough: it carries energy
+// from an extension to the spawn.
+const POOR_ROOM = {
+    spawnEnergy: 50,
+    extensions: [
+        [18, 27, 0], [18, 26, 0], [21, 26, 0], [20, 28, 0], [18, 28, 50],
+        [19, 28, 0], [17, 27, 0], [17, 26, 0], [20, 25, 50], [21, 24, 0], [21, 25, 0]
+    ]
+};
+
 // --- Scenario 1: the room has no workers left ------------------------------
 {
     const sim = makeRoom({ creeps: [], ...DEAD_ROOM });
@@ -418,17 +463,43 @@ const DEAD_ROOM = {
 
     check('a room without workers still gets a harvester', !!attempt,
         attempt ? `cost=${attempt.cost} body=${attempt.body.join(',')}` : 'no spawn attempt');
-    check('the emergency body fits into the energy the spawn holds',
-        !!attempt && attempt.cost <= 250,
+    check('the room energy pays for the body, not only the spawn',
+        !!attempt && attempt.cost === 300,
         attempt ? `cost=${attempt.cost}` : 'no spawn attempt');
-    check('the emergency body is cheaper than the normal one',
-        !!attempt && attempt.cost < 300,
-        attempt ? `cost=${attempt.cost}` : 'no spawn attempt');
-    check('the emergency body can still carry energy and move',
+    check('a room that can afford the full body does not get a reduced one',
+        !!attempt && !(attempt.memory && attempt.memory.rescue),
+        attempt && attempt.memory ? JSON.stringify(attempt.memory) : 'no memory');
+}
+
+// --- Scenario 1b: the state that killed the colony on 2026-11-19 ----------
+{
+    const sim = makeRoom({ creeps: [], ...DEAD_ROOM_19_11 });
+    runTicks(sim, 1);
+
+    const attempt = sim.spawnAttempts.find((a) => a.role === 'harvester');
+
+    check('a room whose energy sits in the extensions still gets a harvester',
+        !!attempt,
+        attempt ? `cost=${attempt.cost} body=${attempt.body.join(',')}` : 'no spawn attempt');
+    check('the harvester is the full body the room can pay for',
+        !!attempt && attempt.cost === 300 && attempt.body.includes('carry') && attempt.body.includes('move'),
+        attempt ? `cost=${attempt.cost} body=${attempt.body.join(',')}` : 'no spawn attempt');
+}
+
+// --- Scenario 1c: a poor room falls back to the reduced ladder --------------
+{
+    const sim = makeRoom({ creeps: [], ...POOR_ROOM });
+    runTicks(sim, 1);
+
+    const attempt = sim.spawnAttempts.find((a) => a.role === 'harvester');
+
+    check('a poor room gets the cheapest body it can pay for',
+        !!attempt && attempt.cost === 100,
+        attempt ? `cost=${attempt.cost} body=${attempt.body.join(',')}` : 'no spawn attempt');
+    check('the last resort body can still carry energy and move',
         !!attempt &&
         attempt.body.filter((p) => p === 'carry').length >= 1 &&
-        attempt.body.filter((p) => p === 'move').length >= 1 &&
-        attempt.body.filter((p) => p === 'work').length >= 1,
+        attempt.body.filter((p) => p === 'move').length >= 1,
         attempt ? attempt.body.join(',') : 'no spawn attempt');
     check('the emergency creep is marked as a rescue one',
         !!attempt && attempt.memory && attempt.memory.rescue === true,

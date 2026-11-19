@@ -215,6 +215,11 @@ function makeRoom(opts) {
         name: 'E34S53',
         controller,
         memory: {},
+        get energyAvailable() {
+            return structures
+                .filter((s) => s.structureType === C.STRUCTURE_SPAWN || s.structureType === C.STRUCTURE_EXTENSION)
+                .reduce((sum, s) => sum + (s.store ? s.store.energy : 0), 0);
+        },
         find(type, o) {
             const filter = o && o.filter;
             let list = [];
