@@ -556,7 +556,45 @@ export function findEnergyTransferTarget(
         deliveryTiles.has(`${c.pos.x},${c.pos.y}`)
     );
 
-    const pool = near.length > 0 ? near : candidates;
+    let pool = near.length > 0 ? near : candidates;
+
+    // **Сдавать надо рядом со своей клеткой добычи.**
+    //
+    // Харвестер, ушедший с клетки добычи, теряет время на дорогу туда и
+    // обратно — а в комнате, где клетки добычи лежат в тупиковом «кармане»,
+    // дорога это полкомнаты. В E34S53 (20.11.2026) харвестер на (20,24)
+    // уходил с полным рюкзаком через весь запад комнаты, потому что
+    // расширения рядом с источником были полны (50 из 50).
+    //
+    // Если рядом со своей клеткой местом нет — энергия не пропадает: она
+    // идёт в контроллер (см. `upgradeControllerInPlace`), и это лучше, чем
+    // часовая дорога с грузом.
+    const harvestTile = creep.memory._harvestTile;
+
+    if (harvestTile) {
+        const adjacent = new Set<string>();
+
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                adjacent.add(`${harvestTile.x + dx},${harvestTile.y + dy}`);
+            }
+        }
+
+        const local = pool.filter((c) => adjacent.has(`${c.pos.x},${c.pos.y}`));
+
+        if (local.length > 0) {
+            pool = local;
+        } else {
+            const localAll = candidates.filter((c) =>
+                adjacent.has(`${c.pos.x},${c.pos.y}`)
+            );
+
+            if (localAll.length > 0) {
+                // Рядом всё занято — не идём в другой конец комнаты.
+                return null;
+            }
+        }
+    }
 
     // Пока в выбранном хранилище есть место, харвестер ходит в него.
     // Пересчитывать цель каждый тик нельзя: выбор становится неустойчивым,
@@ -661,25 +699,7 @@ export function findEnergyTransferTarget(
             rate *= SPAWN_FEED_PRIORITY;
         }
 
-        // При равной скорости доставки выбираем хранилище с БОЛЬШИМ запасом
-        // свободного места.
-        //
-        // Формула скорости не различает хранилища на расстоянии 0: и
-        // расширение на 50 мест, и контейнер на 1000 дают одинаковую
-        // скорость. Но расширение наполняется за одну сдачу, и следующую
-        // энергию харвестеру некуда деть — он идёт в другой конец комнаты,
-        // а доход падает вдвое. В E34S53 все три расширения рядом с
-        // источником были полны (50 из 50), и харвестер уходил с полным
-        // рюкзаком через полкомнаты.
-        const free = candidate.store.getFreeCapacity(RESOURCE_ENERGY) ?? 0;
-        const bestFree =
-            best?.store.getFreeCapacity(RESOURCE_ENERGY) ?? Number.NEGATIVE_INFINITY;
-
-        if (
-            rate > bestRate ||
-            (rate === bestRate && distance < bestDistance) ||
-            (rate === bestRate && distance === bestDistance && free > bestFree)
-        ) {
+        if (rate > bestRate || (rate === bestRate && distance < bestDistance)) {
             best = candidate;
             bestRate = rate;
             bestDistance = distance;
@@ -1921,25 +1941,7 @@ export function findEnergyDonor(
         }
     }
 
-    // Из самых близких к клеткам добычи берём **самое маленькое** хранилище.
-    //
-    // Большой буфер (контейнер на 1000, хранилище на 50 000) нужен
-    // харвестерам: они сдают в него энергию в шаг от источника, и он
-    // принимает сразу много. Апгрейдеру же достаточно ближайшего
-    // расширения: опустошив его, он пойдёт к следующему, и большой буфер
-    // останется харвестерам.
-    //
-    // В E34S53 (20.11.2026) апгрейдер забирал энергию из контейнера на
-    // (19,21) — он был в шаге от клеток добычи, — и три расширения рядом с
-    // источником оставались полными (50 из 50). Харвестеру на (20,24) было
-    // некуда сдать рюкзак, и он уходил через полкомнаты: доход падал вдвое.
-    const capacity = (s: AnyStoreStructure): number =>
-        s.store.getCapacity?.(RESOURCE_ENERGY) ?? 0;
-
-    const smallestCapacity = Math.min(...pool.map(capacity));
-    const smallest = pool.filter((c) => capacity(c) === smallestCapacity);
-
-    const donor = creep.pos.findClosestByPath(smallest, {
+    const donor = creep.pos.findClosestByPath(pool, {
         ignore: [FIND_CREEPS]
     });
 
