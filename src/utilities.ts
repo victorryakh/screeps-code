@@ -6,6 +6,7 @@ import {
     WALL_TERRAIN,
     UPGRADE_RANGE,
     UPGRADE_SPOT_VERSION,
+    UPGRADE_SPOT_TTL,
     HARVEST_RATE_PER_WORK,
     DELIVERY_TARGET_TTL,
     DELIVERY_FATIGUE_FACTOR,
@@ -270,9 +271,9 @@ export function harvestEnergy(
     }
 
     if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        const tiles = findHarvestTiles(creep, source);
+        const { usable, blocked } = findHarvestTiles(creep, source);
 
-        for (const tile of tiles) {
+        for (const tile of usable) {
             const result = moveCached(creep, tile, opts);
 
             if (result === OK || result === ERR_TIRED) {
@@ -295,7 +296,28 @@ export function harvestEnergy(
             }
         }
 
-        // Ни одна соседняя клетка не подошла — пробуем цель напрямую.
+        // Ни одна клетка добычи недостижима: карман заперт нашими же
+        // крипами. Кружить по комнате бессмысленно — крип так и не дойдёт до
+        // источника (в E34S53 харвестер ходил кругами по полурумью с
+        // полным рюкзаком минуты подряд). Лучше занять клетку у кармана и
+        // ждать, когда освободится вход.
+        const waiting = findHarvestWaitingSpot(creep);
+
+        if (waiting) {
+            return moveCached(creep, waiting, opts);
+        }
+
+        // Ждать негде: крип заперт в собственном тупике. Тогда хотя бы
+        // нацелимся на клетку добычи — когда её освободят, крип дойдёт.
+        for (const tile of blocked) {
+            const result = moveCached(creep, tile, opts);
+
+            if (result === OK || result === ERR_TIRED) {
+                return result;
+            }
+        }
+
+        // Ни одной соседней клетки нет — пробуем цель напрямую.
         return moveCached(creep, source, opts);
     }
 
@@ -697,12 +719,59 @@ export function deliveryTripLoad(
 }
 
 /**
+ * Матрица стоимостей, в которой клетки, занятые крипами, непроходимы.
+ *
+ * @remarks
+ * Модель пути бота должна совпадать с моделью пути движка, иначе бот
+ * выбирает цель, до которой движок крипа не дойдёт.
+ *
+ * `PathFinder.search` (то, чем мерил бот) работает по матрице стоимостей и
+ * **крипов в пути не видит**: клетка с крипом стоит столько же, сколько
+ * пустая. А движок (`Creep.moveTo` → `Room.findPath` → сетка
+ * `makePathfindingGrid`) помечает крипов как препятствия: в движке
+ * `OBSTACLE_OBJECT_TYPES` включает `creep`, и клетка с крипом получает
+ * стоимость 0, то есть непроходима.
+ *
+ * Разница не косметическая. В E34S53 (20.11.2026) источник лежит на стене,
+ * а его три клетки добычи образуют тупиковый «карман» шириной в одну клетку,
+ * и единственный выход из него — клетка (20,21), которую занимает апгрейдер.
+ * Бот мерил расстояние до расширения на (21,24) как до одной-двух клеток,
+ * выбирал его целью и посылал харвестера в дорогу — а движок вёл его
+ * в обход всего полурумья, потому что клетки добычи заняты своими же
+ * крипами. Харвестер ходил кругами по комнате с полным рюкзаком минуты
+ * подряд и не сдавал энергию: доход комнаты падал вдвое.
+ *
+ * Поэтому расстояние меряется по той же модели, по которой пойдёт крип:
+ * клетки с крипами (кроме самого искателя) помечаются непроходимыми.
+ *
+ * @param creep Крип, для которого строится матрица.
+ * @returns Матрица стоимостей с непроходимыми клетками крипов.
+ */
+function creepObstacleMatrix(creep: Creep): CostMatrix {
+    const matrix = new PathFinder.CostMatrix();
+
+    for (const other of creep.room.find(FIND_CREEPS)) {
+        if (other.name === creep.name) {
+            continue;
+        }
+
+        matrix.set(other.pos.x, other.pos.y, 255);
+    }
+
+    return matrix;
+}
+
+/**
  * Расстояние от крипа до хранилища **по пути**, а не по прямой линии.
  *
  * @remarks
  * Путь ищется до клетки, с которой энергию можно сдать (дистанция 1 от
  * хранилища). Если путь не найден или поиск не удался, берётся расстояние по
  * прямой — это заведомо заниженная оценка, но она лучше, чем ничего.
+ *
+ * Крипы в пути считаются препятствиями — так же, как их считает движок
+ * (см. {@link creepObstacleMatrix}). Иначе бот выбирает цель, до которой
+ * крип физически не дойдёт.
  *
  * Поиск пути дорог, поэтому он делается не каждый тик: цель доставки
  * кэшируется в памяти крипа (см. {@link DELIVERY_TARGET_TTL}), а сам
@@ -735,10 +804,16 @@ function deliveryPathDistance(creep: Creep, target: { pos: RoomPosition }): numb
     }
 
     try {
-        const path = PathFinder.search(creep.pos, {
-            pos: target.pos,
-            range: 1
-        });
+        const matrix = creepObstacleMatrix(creep);
+
+        const path = PathFinder.search(
+            creep.pos,
+            {
+                pos: target.pos,
+                range: 1
+            },
+            { roomCallback: () => matrix }
+        );
 
         if (path && path.path && path.path.length > 0) {
             // Путь движка начинается с исходной клетки, поэтому длина пути
@@ -1411,6 +1486,41 @@ export function collectHarvestSlots(
 }
 
 /**
+ * Достижима ли клетка добычи для крипа.
+ *
+ * @remarks
+ * Проверяется тем же поиском пути, каким пойдёт крип: крипы —
+ * препятствия, постройки — препятствия. Это дороже, чем просто спросить
+ * «свободна ли клетка», но дешевле, чем полный обход комнаты: поиск идёт
+ * от крипа к клетке и останавливается, как только цель найдена.
+ *
+ * @param creep Крип.
+ * @param slot  Клетка добычи.
+ * @returns `true`, если крип может дойти до клетки.
+ */
+function isHarvestSlotReachable(creep: Creep, slot: RoomPosition): boolean {
+    if (creep.pos.x === slot.x && creep.pos.y === slot.y) {
+        return true;
+    }
+
+    try {
+        const matrix = creepObstacleMatrix(creep);
+
+        const path = PathFinder.search(
+            creep.pos,
+            { pos: slot, range: 0 },
+            { roomCallback: () => matrix }
+        );
+
+        return !!(path && path.path && path.path.length > 0);
+    } catch {
+        // Путь посчитать не удалось — считаем клетку достижимой: лучше
+        // попробовать, чем молча простаивать.
+        return true;
+    }
+}
+
+/**
  * Ищет клетки рядом с целью, на которые крип может встать и всё равно
  * достать до цели (радиус действия добычи — 1 клетка).
  *
@@ -1439,12 +1549,14 @@ export function collectHarvestSlots(
  * @param creep  Крип, которому нужен подход.
  * @param target Цель добычи (`Source`, `Mineral`, `Deposit`).
  * @returns Подходящие клетки: сначала своя, затем свободные, затем занятые;
- *          ближайшая к крипу — первой.
+ *          ближайшая к крипу — первой. В `blocked` — клетки, до которых
+ *          физически не дойти (их занимают другие крипы): к ним можно
+ *          обратиться только в крайнем случае.
  */
 export function findHarvestTiles(
     creep: Creep,
     target: Source | Mineral | Deposit
-): RoomPosition[] {
+): { usable: RoomPosition[]; blocked: RoomPosition[] } {
     const room = creep.room;
     const slots = collectHarvestSlots(room, target);
 
@@ -1472,14 +1584,49 @@ export function findHarvestTiles(
     }
 
     const cached = creep.memory._harvestTile;
+
+    // Быстрый путь: крип стоит на своей клетке добычи и работает. Путь
+    // считать незачем — а считать его каждый тик дорого: поиск пути по
+    // комнате стоит CPU, которого у комнаты мало.
+    if (cached && creep.pos.x === cached.x && creep.pos.y === cached.y) {
+        for (const slot of slots) {
+            if (slot.x === cached.x && slot.y === cached.y) {
+                return { usable: [slot], blocked: [] };
+            }
+        }
+    }
+
     const free: RoomPosition[] = [];
     const taken: RoomPosition[] = [];
     const mine: RoomPosition[] = [];
+    const blocked: RoomPosition[] = [];
 
+    // Клетка добычи годится только если до неё **можно дойти**. Крипы —
+    // препятствия для движения, поэтому клетка, отрезанная ими, недостижима
+    // так же, как её не видно за стеной.
+    //
+    // Это не теория. В E34S53 (20.11.2026) источник лежит на стене, и его
+    // три клетки добычи — (20,22), (20,23), (20,24) — образуют тупиковый
+    // «карман» шириной в одну клетку: с запада стены рельефа, с востока — наши
+    // же башни и расширения. Средняя клетка (20,23) достижима только через
+    // (20,22) или (20,24), а обе заняты харвестерами. Новый харвестер,
+    // которому досталась средняя клетка, физически не мог в неё войти:
+    // поиск пути водил его вокруг всего полурумья (21 клетка), и он не добывал
+    // ничего, пока кто-то не умирал.
+    //
+    // Поэтому клетка, до которой нет пути, в список кандидатов не попадает:
+    // крип не должен закрепляться за ней и не должен к ней идти. Если
+    // достижимых клеток не осталось, крип ждёт у кармана (см.
+    // `findHarvestWaitingSpot`).
     for (const slot of slots) {
         const key = `${slot.x},${slot.y}`;
         const isMine =
             cached !== undefined && cached.x === slot.x && cached.y === slot.y;
+
+        if (!isHarvestSlotReachable(creep, slot)) {
+            blocked.push(slot);
+            continue;
+        }
 
         if (isMine && !occupied.has(key)) {
             mine.push(slot);
@@ -1506,8 +1653,123 @@ export function findHarvestTiles(
 
     free.sort(byDistance);
     taken.sort(byDistance);
+    blocked.sort(byDistance);
 
-    return mine.concat(free, taken);
+    return { usable: mine.concat(free, taken), blocked };
+}
+
+/**
+ * Клетка, на которой крип может ждать своей клетки добычи.
+ *
+ * @remarks
+ * Если ни одна клетка добычи не достижима (карман заперт своими же
+ * крипами), крип не должен бродить по комнате: он занимает клетку рядом с
+ * источником и ждёт, когда освободится вход.
+ *
+ * Ждать надо на клетке доставки — рядом с клетками добычи. Такая клетка
+ * свободна по определению (иначе она не была бы «рядом с клеткой добычи»),
+ * и с неё крип входит в карман за один шаг, как только там что-то освободится.
+ *
+ * @param creep Крип, которому нужна клетка ожидания.
+ * @returns Клетка ожидания или `null`, если такой нет.
+ */
+export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
+    const room = creep.room;
+    const harvestSlots = collectHarvestSlotKeys(room);
+    const occupied = new Set<string>();
+    const here = `${creep.pos.x},${creep.pos.y}`;
+
+    for (const other of room.find(FIND_CREEPS)) {
+        if (other.name === creep.name) {
+            continue;
+        }
+
+        occupied.add(`${other.pos.x},${other.pos.y}`);
+    }
+
+    for (const s of room.find(FIND_STRUCTURES)) {
+        occupied.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    for (const c of room.find(FIND_CONSTRUCTION_SITES)) {
+        occupied.add(`${c.pos.x},${c.pos.y}`);
+    }
+
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+    const ring = new Set<string>();
+
+    if (spawn) {
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                ring.add(`${spawn.pos.x + dx},${spawn.pos.y + dy}`);
+            }
+        }
+    }
+
+    const free: RoomPosition[] = [];
+    const offRing: RoomPosition[] = [];
+
+    for (const key of collectDeliveryTileKeys(room)) {
+        const [x, y] = key.split(',').map(Number);
+
+        if (x === undefined || y === undefined) {
+            continue;
+        }
+
+        // Своя клетка — не место ожидания: ждать надо там, откуда в карман
+        // можно войти за один шаг.
+        if (key === here) {
+            continue;
+        }
+
+        if (harvestSlots.has(key) || occupied.has(key)) {
+            continue;
+        }
+
+        // Стена рельефа местом ожидания быть не может: движок силой
+        // считает цель проходимой и построил бы путь в стену.
+        if (room.getTerrain().get(x, y) === WALL_TERRAIN) {
+            continue;
+        }
+
+        const pos = new RoomPosition(x, y, room.name);
+        free.push(pos);
+
+        // Кольцо рождения — плохое место ожидания: комната сама сдвинет
+        // крипа с кольца, если клеток рождения станет мало.
+        if (!ring.has(key)) {
+            offRing.push(pos);
+        }
+    }
+
+    if (free.length === 0) {
+        return null;
+    }
+
+    const goals = offRing.length > 0 ? offRing : free;
+
+    try {
+        const matrix = creepObstacleMatrix(creep);
+        const path = PathFinder.search(
+            creep.pos,
+            goals.map((pos) => ({ pos, range: 0 })),
+            { roomCallback: () => matrix }
+        );
+
+        if (!path || !path.path || path.path.length === 0) {
+            return null;
+        }
+
+        const end = path.path[path.path.length - 1];
+
+        if (!end) {
+            return null;
+        }
+
+        return goals.find((pos) => pos.x === end.x && pos.y === end.y) ?? null;
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -1758,6 +2020,31 @@ export function collectHarvestSlotKeys(room: Room): Set<string> {
     }
 
     return keys;
+}
+
+/**
+ * Виден ли контроллер комнаты с указанной клетки.
+ *
+ * @remarks
+ * Апгрейд работает с расстояния {@link UPGRADE_RANGE}. Клетка, откуда
+ * контроллер не виден, для апгрейдера бесполезна: он там стоит и не даёт
+ * контроллеру ни единицы прогресса.
+ *
+ * @param room Комната.
+ * @param pos  Клетка.
+ * @returns `true`, если с этой клетки контроллер виден.
+ */
+export function canUpgradeFrom(room: Room, pos: RoomPosition): boolean {
+    const controller = room.controller;
+
+    if (!controller) {
+        return false;
+    }
+
+    return (
+        Math.max(Math.abs(pos.x - controller.pos.x), Math.abs(pos.y - controller.pos.y)) <=
+        UPGRADE_RANGE
+    );
 }
 
 /**
@@ -2036,6 +2323,24 @@ export function findStepAsideTarget(
             }
 
             if (!workerRegion.has(key)) {
+                continue;
+            }
+
+            // Сдвиг не должен отнимать у рабочего его работу. Апгрейдер,
+            // которого сдвинули с клетки, откуда виден контроллер, туда
+            // больше не вернётся: он будет ходить туда-обратно и не даст
+            // контроллеру ни единицы прогресса.
+            //
+            // В E34S53 (20.11.2026) единственная клетка, откуда виден
+            // контроллер и которая не занята клеткой добычи, — (20,21).
+            // Апгрейдер стоял на ней, и «сдвиг в сторону» уводил его на
+            // (19,20), откуда контроллер не виден: он ходил туда-обратно
+            // каждые несколько тиков и давал контроллеру ноль вместо двух
+            // единиц прогресса в тик.
+            if (
+                creep.memory.role === ROLE.UPGRADER &&
+                !canUpgradeFrom(room, new RoomPosition(x, y, room.name))
+            ) {
                 continue;
             }
 
@@ -2816,6 +3121,43 @@ export function findBuildSpot(creep: Creep, site: ConstructionSite): RoomPositio
 }
 
 /**
+ * Длина пути от клеток добычи до указанной клетки.
+ *
+ * @remarks
+ * Та же мера, по которой {@link findUpgradeSpot} выбирает клетку апгрейда:
+ * чем ближе рабочий к источнику, тем короче рейс харвестера и тем выше доход
+ * комнаты. Нужна, чтобы сравнивать старую и новую клетку апгрейда: переезжать
+ * имеет смысл только на строго лучшую.
+ *
+ * @param room Комната.
+ * @param pos  Клетка.
+ * @returns Длина пути в клетках или `-1`, если путь не найден.
+ */
+function upgradeSpotPathLength(room: Room, pos: RoomPosition): number {
+    const candidates = [pos];
+    let best = Number.POSITIVE_INFINITY;
+
+    for (const key of collectHarvestSlotKeys(room)) {
+        const [x, y] = key.split(',').map(Number);
+
+        if (x === undefined || y === undefined) {
+            continue;
+        }
+
+        const found = findClosestCandidateByPath(
+            new RoomPosition(x, y, room.name),
+            candidates
+        );
+
+        if (found && found.length < best) {
+            best = found.length;
+        }
+    }
+
+    return Number.isFinite(best) ? best : -1;
+}
+
+/**
  * Ищет ближайшую к точке клетку из списка по длине пути.
  *
  * @remarks
@@ -3002,16 +3344,26 @@ export function findUpgradeSpot(room: Room, creep: Creep): RoomPosition | null {
         const key = `${other.pos.x},${other.pos.y}`;
         const holder = claims[key];
 
-        if (holder === undefined) {
+        // Клетку рабочего с приоритетом не ниже нашего взять нельзя: он её
+        // не освободит.
+        if (upgradeSpotPriority(other) >= myPriority) {
+            blocked.add(key);
+            continue;
+        }
+
+        if (holder === undefined && upgradeSpotPriority(other) === 0) {
             // Клетку никто не занимает по договорённости — она просто занята
             // живым крипом (проход, клетка добычи). Отбирать её нельзя.
             blocked.add(key);
             continue;
         }
 
-        if (holder !== creep.name && upgradeSpotPriority(Game.creeps[holder]) >= myPriority) {
-            blocked.add(key);
-        }
+        // Клетку рабочего с приоритетом ниже нашего — можно: он увидит
+        // притязание и освободит её сам (см. `ensureUpgradeSpot`).
+        //
+        // В E34S53 билдер стоял на (20,21) — единственной клетке рядом с
+        // источником, откуда виден контроллер, — и держал её: апгрейдер
+        // (2 WORK) не мог её взять и уходил за семь шагов от источника.
     }
 
     const candidates: RoomPosition[] = [];
@@ -3237,12 +3589,27 @@ export function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
     }
 
     const cached = creep.memory._upgradeSpot;
+    const age = creep.memory._upgradeSpotTick
+        ? Game.time - creep.memory._upgradeSpotTick
+        : Number.POSITIVE_INFINITY;
+
+    // Клетку держит рабочий с приоритетом не ниже нашего? Тогда её надо
+    // освободить — независимо от срока жизни кэша.
+    let contested = false;
 
     if (
         cached &&
         cached.roomName === room.name &&
         creep.memory._upgradeSpotVersion === UPGRADE_SPOT_VERSION
     ) {
+        const key = `${cached.x},${cached.y}`;
+        const holder = claims[key];
+
+        contested =
+            holder !== undefined &&
+            holder !== creep.name &&
+            upgradeSpotPriority(Game.creeps[holder]) >= upgradeSpotPriority(creep);
+
         const built =
             room.find(FIND_STRUCTURES, {
                 filter: (s) => s.pos.x === cached.x && s.pos.y === cached.y
@@ -3261,20 +3628,14 @@ export function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
         // апгрейда каждый тик (PathFinder стоит CPU, а клетка всё равно
         // та же самая).
         //
-        // Исключение — клетка, закреплённая за крипом с приоритетом не ниже
-        // нашего: это не «проход», а рабочее место, и отдать его можно
-        // только тому, у кого приоритет выше (см. `upgradeSpotPriority`).
-        // В E34S53 билдер держал единственную клетку апгрейда у источника
-        // и блокировал апгрейдера: крипы — препятствия для движения, и
-        // апгрейдер физически не мог на неё встать.
-        const key = `${cached.x},${cached.y}`;
-        const holder = claims[key];
-        const contested =
-            holder !== undefined &&
-            holder !== creep.name &&
-            upgradeSpotPriority(Game.creeps[holder]) >= upgradeSpotPriority(creep);
-
-        if (!built && !isReservedTile(room, cached.x, cached.y) && !contested) {
+        // Срок жизни кэша — {@link UPGRADE_SPOT_TTL}: без него рабочий
+        // навсегда оставался на клетке, которая больше ему не нужна.
+        if (
+            !built &&
+            !isReservedTile(room, cached.x, cached.y) &&
+            !contested &&
+            age < UPGRADE_SPOT_TTL
+        ) {
             claims[key] = creep.name;
             return new RoomPosition(cached.x, cached.y, cached.roomName);
         }
@@ -3282,13 +3643,53 @@ export function ensureUpgradeSpot(creep: Creep): RoomPosition | null {
 
     const spot = findUpgradeSpot(room, creep);
 
+    // Срок жизни кэша истёк — клетку пересчитываем. Но переезжаем только на
+    // **строго лучшую**: иначе клетка апгрейда начала бы кочевать из-за
+    // случайного прохода чужого крипа мимо клетки. Споренная клетка —
+    // исключение: её надо освободить в любом случае.
+    if (
+        spot &&
+        cached &&
+        cached.roomName === room.name &&
+        !contested &&
+        (cached.x !== spot.x || cached.y !== spot.y)
+    ) {
+        const oldLength = upgradeSpotPathLength(
+            room,
+            new RoomPosition(cached.x, cached.y, room.name)
+        );
+        const newLength = upgradeSpotPathLength(room, spot);
+
+        if (oldLength >= 0 && newLength >= 0 && newLength >= oldLength) {
+            const oldKey = `${cached.x},${cached.y}`;
+            claims[oldKey] = creep.name;
+            creep.memory._upgradeSpotTick = Game.time;
+
+            return new RoomPosition(cached.x, cached.y, cached.roomName);
+        }
+    }
+
     if (spot) {
+        // Старая клетка освобождается: иначе она осталась бы в карте
+        // притязаний и блокировала бы другого рабочего. В E34S53 билдер
+        // держал (16,21) — семь шагов от клеток добычи — и не отпускал её
+        // никогда, потому что кэш не имел срока жизни.
+        if (cached && (cached.x !== spot.x || cached.y !== spot.y)) {
+            const oldKey = `${cached.x},${cached.y}`;
+
+            if (claims[oldKey] === creep.name) {
+                delete claims[oldKey];
+            }
+        }
+
         claims[`${spot.x},${spot.y}`] = creep.name;
         creep.memory._upgradeSpot = { x: spot.x, y: spot.y, roomName: spot.roomName };
         creep.memory._upgradeSpotVersion = UPGRADE_SPOT_VERSION;
+        creep.memory._upgradeSpotTick = Game.time;
     } else {
         delete creep.memory._upgradeSpot;
         delete creep.memory._upgradeSpotVersion;
+        delete creep.memory._upgradeSpotTick;
     }
 
     return spot;

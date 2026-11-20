@@ -11,7 +11,9 @@
  *   - structures and construction sites block movement as well, but the goal
  *     tile itself is always walkable (the engine does the same: it forces the
  *     goal tile walkable so that a creep can path *onto* it);
- *   - movement is eight-directional, like the engine's.
+ *   - movement is eight-directional, like the engine's;
+ *   - the cost matrix passed through `opts.roomCallback` is honoured: a tile
+ *     with cost >= 255 is unwalkable, exactly like the engine's pathfinder.
  *
  * Usage:
  *   const { installPathFinder } = require('./mock-pathfinder');
@@ -31,12 +33,49 @@ const STEPS = [
  * @param {() => any} getRoom Функция, возвращающая текущую комнату.
  */
 function installPathFinder(getRoom) {
+    /** Minimal `CostMatrix`: costs are a plain map of "x,y" -> cost. */
+    class CostMatrix {
+        constructor() {
+            this.costs = new Map();
+        }
+
+        set(x, y, cost) {
+            this.costs.set(`${x},${y}`, cost);
+        }
+
+        get(x, y) {
+            return this.costs.get(`${x},${y}`) || 0;
+        }
+
+        clone() {
+            const copy = new CostMatrix();
+            copy.costs = new Map(this.costs);
+            return copy;
+        }
+
+        serialize() {
+            return Array.from(this.costs.entries());
+        }
+    }
+
     global.PathFinder = {
-        search(origin, goal) {
+        CostMatrix,
+
+        search(origin, goal, opts) {
             const room = getRoom();
 
             if (!room) {
                 return undefined;
+            }
+
+            let matrix = null;
+
+            if (opts && typeof opts.roomCallback === 'function') {
+                const provided = opts.roomCallback(room.name);
+
+                if (provided && typeof provided.get === 'function') {
+                    matrix = provided;
+                }
             }
 
             const goals = Array.isArray(goal) ? goal : [goal];
@@ -113,6 +152,10 @@ function installPathFinder(getRoom) {
                         }
 
                         const goal = isGoal(nx, ny);
+
+                        if (matrix && matrix.get(nx, ny) >= 255) {
+                            continue;
+                        }
 
                         if (!goal) {
                             if (walls.has(key) || blocked.has(key)) {

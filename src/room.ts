@@ -28,6 +28,7 @@ import {
     CONTAINER_BUILD_COST,
     TOWER_BUILD_COST,
     TOWER_RANGE,
+    UPGRADE_RANGE,
     DELIVERY_STRUCTURE_CHECK_INTERVAL,
     BUILDER_RESERVE_ENERGY,
     DELIVERY_BUILD_HORIZON_TICKS,
@@ -41,6 +42,7 @@ import {
     openBirthExit,
     findFreeTileNear,
     findUpgradeSpot,
+    computeReachableTiles,
     collectHarvestSlots,
     collectHarvestSlotKeys,
     collectDeliveryTileKeys,
@@ -52,6 +54,7 @@ import {
     findStepAsideTarget,
     creepBlocksSomebody,
     regionForCreep,
+    canUpgradeFrom,
     type SpawnRingInfo
 } from './utilities';
 import * as log from './log';
@@ -1001,8 +1004,13 @@ function findTowerSpot(room: Room): RoomPosition | null {
     const ring = ringTileKeysOf(spawn);
     const terrain = room.getTerrain();
 
-    let best: RoomPosition | null = null;
-    let bestDistance = Number.POSITIVE_INFINITY;
+    const controller = room.controller;
+
+    if (!controller) {
+        return null;
+    }
+
+    const candidates: { pos: RoomPosition; distance: number }[] = [];
 
     for (const key of collectDeliveryTileKeys(room)) {
         const [x, y] = key.split(',').map(Number);
@@ -1030,13 +1038,71 @@ function findTowerSpot(room: Room): RoomPosition | null {
             continue;
         }
 
-        if (distance < bestDistance) {
-            bestDistance = distance;
-            best = new RoomPosition(x, y, room.name);
+        // **Клетка, откуда виден контроллер, рабочему тоже нужна.**
+        //
+        // Апгрейд работает с расстояния `UPGRADE_RANGE`, и в комнате, где
+        // источник лежит в стенном кармане, таких клеток единицы. В E34S53
+        // это была (20,21) — единственная клетка рядом с источником, откуда
+        // виден контроллер. Башня на ней отобрала бы у апгрейдера его место,
+        // и контроллер получал бы ноль прогресса.
+        if (
+            Math.max(
+                Math.abs(x - controller.pos.x),
+                Math.abs(y - controller.pos.y)
+            ) <= UPGRADE_RANGE
+        ) {
+            continue;
+        }
+
+        candidates.push({ pos: new RoomPosition(x, y, room.name), distance });
+    }
+
+    candidates.sort((a, b) => a.distance - b.distance);
+
+    for (const candidate of candidates) {
+        if (!blocksHarvestAccess(room, candidate.pos.x, candidate.pos.y)) {
+            return candidate.pos;
         }
     }
 
-    return best;
+    return null;
+}
+
+/**
+ * Закроет ли постройка на этой клетке доступ к клеткам добычи.
+ *
+ * @remarks
+ * Клетки добычи — конечный ресурс комнаты, и потеря любой из них — минус
+ * треть дохода. Башня или расширение, поставленное на единственный путь к
+ * источнику, закрывают его навсегда: постройку не снести (у башни нет
+ * «разобрать», у расширения — снести можно, но это потеря ёмкости).
+ *
+ * В E34S53 клетки добычи (20,22), (20,23), (20,24) образуют тупиковый
+ * «карман» шириной в одну клетку, и восточная стена этого кармана — наши же
+ * башни и расширения. Любая постройка рядом с карманом должна проверяться на
+ * то, что она не закрывает последний вход.
+ *
+ * @param room Комната.
+ * @param x    X клетки.
+ * @param y    Y клетки.
+ * @returns `true`, если постройка здесь отрежет клетку добычи от комнаты.
+ */
+function blocksHarvestAccess(room: Room, x: number, y: number): boolean {
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+
+    if (!spawn) {
+        return false;
+    }
+
+    const region = computeReachableTiles(room, spawn.pos, new Set<string>([`${x},${y}`]));
+
+    for (const key of collectHarvestSlotKeys(room)) {
+        if (!region.has(key)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 /**
@@ -2099,6 +2165,24 @@ function ensureCreepsNotBlocking(room: Room): void {
         // Харвестер на клетке добычи работает: это его место, и «сдвиг» здесь
         // означал бы только потерю дохода.
         if (harvestSlots.has(key)) {
+            delete creep.memory._stepAside;
+            delete creep.memory._stepAsideTick;
+            continue;
+        }
+
+        // Апгрейдер, от которого виден контроллер, тоже работает — и сдвиг
+        // уводит его ровно туда, откуда контроллер не виден.
+        //
+        // В E34S53 (20.11.2026) единственная клетка, откуда виден контроллер
+        // и которая не занята клеткой добычи, — (20,21). Апгрейдер стоял на
+        // ней, «сдвиг в сторону» уводил его на (19,20), и он ходил туда-обратно
+        // каждые несколько тиков: контроллер получал ноль вместо двух единиц
+        // прогресса в тик. Сдвиг должен открывать кому-то выход, а не отнимать
+        // у рабочего его работу.
+        if (
+            creep.memory.role === ROLE.UPGRADER &&
+            canUpgradeFrom(room, creep.pos)
+        ) {
             delete creep.memory._stepAside;
             delete creep.memory._stepAsideTick;
             continue;
