@@ -27,6 +27,7 @@ import {
     tryUpgradeInPlace,
     isSourceSaturated,
     upgradeFromWorkSpot,
+    ensureUpgradeSpot,
     runStepAside
 } from '../utilities';
 import * as log from '../log';
@@ -72,6 +73,17 @@ function runDonorMode(creep: Creep): void {
     // не доходит. В E34S53 апгрейдер держал закрепление на клетке (20,24),
     // и третья клетка добычи простаивала.
     delete creep.memory._harvestTile;
+
+    // Клетку апгрейда обновляем **и когда энергии нет**.
+    //
+    // Пока энергия есть, апгрейдер работает и клетку не пересчитывает: срок
+    // жизни кэша ещё не истёк. А когда энергия кончилась, он идёт за ней к
+    // донору — и если донор далеко, клетка апгрейда успевает устареть.
+    // В E34S53 (20.11.2026) апгрейдер носил energy к контейнеру на (19,21) с
+    // клетки (16,21) — семи шагов от источника, — и по дороге туда-обратно
+    // проходил половину комнаты, вместо того чтобы стоять у источника и
+    // качать контроллер.
+    ensureUpgradeSpot(creep);
 
     if (creep.store[RESOURCE_ENERGY] === 0) {
         if (creep.memory._excess) {
