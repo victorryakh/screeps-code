@@ -661,7 +661,25 @@ export function findEnergyTransferTarget(
             rate *= SPAWN_FEED_PRIORITY;
         }
 
-        if (rate > bestRate || (rate === bestRate && distance < bestDistance)) {
+        // При равной скорости доставки выбираем хранилище с БОЛЬШИМ запасом
+        // свободного места.
+        //
+        // Формула скорости не различает хранилища на расстоянии 0: и
+        // расширение на 50 мест, и контейнер на 1000 дают одинаковую
+        // скорость. Но расширение наполняется за одну сдачу, и следующую
+        // энергию харвестеру некуда деть — он идёт в другой конец комнаты,
+        // а доход падает вдвое. В E34S53 все три расширения рядом с
+        // источником были полны (50 из 50), и харвестер уходил с полным
+        // рюкзаком через полкомнаты.
+        const free = candidate.store.getFreeCapacity(RESOURCE_ENERGY) ?? 0;
+        const bestFree =
+            best?.store.getFreeCapacity(RESOURCE_ENERGY) ?? Number.NEGATIVE_INFINITY;
+
+        if (
+            rate > bestRate ||
+            (rate === bestRate && distance < bestDistance) ||
+            (rate === bestRate && distance === bestDistance && free > bestFree)
+        ) {
             best = candidate;
             bestRate = rate;
             bestDistance = distance;
@@ -1748,6 +1766,27 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
 
     const goals = offRing.length > 0 ? offRing : free;
 
+    // Клетка ожидания запоминается: пересчитывать её каждый тик нельзя —
+    // «ближайшая» клетка меняется по мере того, как крип к ней идёт, и
+    // харвестер начинает бродить по комнате, вместо того чтобы ждать у
+    // источника.
+    const cached = creep.memory._waitSpot;
+
+    if (cached) {
+        const key = `${cached.x},${cached.y}`;
+
+        if (
+            !occupied.has(key) &&
+            !harvestSlots.has(key) &&
+            key !== here &&
+            room.getTerrain().get(cached.x, cached.y) !== WALL_TERRAIN
+        ) {
+            return new RoomPosition(cached.x, cached.y, room.name);
+        }
+
+        delete creep.memory._waitSpot;
+    }
+
     try {
         const matrix = creepObstacleMatrix(creep);
         const path = PathFinder.search(
@@ -1766,7 +1805,15 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
             return null;
         }
 
-        return goals.find((pos) => pos.x === end.x && pos.y === end.y) ?? null;
+        const found = goals.find((pos) => pos.x === end.x && pos.y === end.y);
+
+        if (!found) {
+            return null;
+        }
+
+        creep.memory._waitSpot = { x: found.x, y: found.y };
+
+        return found;
     } catch {
         return null;
     }
