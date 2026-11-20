@@ -1921,7 +1921,25 @@ export function findEnergyDonor(
         }
     }
 
-    const donor = creep.pos.findClosestByPath(pool, {
+    // Из самых близких к клеткам добычи берём **самое маленькое** хранилище.
+    //
+    // Большой буфер (контейнер на 1000, хранилище на 50 000) нужен
+    // харвестерам: они сдают в него энергию в шаг от источника, и он
+    // принимает сразу много. Апгрейдеру же достаточно ближайшего
+    // расширения: опустошив его, он пойдёт к следующему, и большой буфер
+    // останется харвестерам.
+    //
+    // В E34S53 (20.11.2026) апгрейдер забирал энергию из контейнера на
+    // (19,21) — он был в шаге от клеток добычи, — и три расширения рядом с
+    // источником оставались полными (50 из 50). Харвестеру на (20,24) было
+    // некуда сдать рюкзак, и он уходил через полкомнаты: доход падал вдвое.
+    const capacity = (s: AnyStoreStructure): number =>
+        s.store.getCapacity?.(RESOURCE_ENERGY) ?? 0;
+
+    const smallestCapacity = Math.min(...pool.map(capacity));
+    const smallest = pool.filter((c) => capacity(c) === smallestCapacity);
+
+    const donor = creep.pos.findClosestByPath(smallest, {
         ignore: [FIND_CREEPS]
     });
 
