@@ -1733,6 +1733,13 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
         occupied.add(`${c.pos.x},${c.pos.y}`);
     }
 
+    // Клетка, занятая рабочим местом (см. `ensureUpgradeSpot`), местом
+    // ожидания быть не может: апгрейдер туда не встанет и не будет качать
+    // контроллер. В E34S53 харвестер ждал у источника на (20,21) — на
+    // единственной клетке, откуда виден контроллер, — и апгрейдер не мог
+    // на неё войти.
+    const upgradeSpots = new Set(Object.keys(room.memory._upgradeSpots ?? {}));
+
     const spawn = room.find(FIND_MY_SPAWNS)[0];
     const ring = new Set<string>();
 
@@ -1761,6 +1768,10 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
         }
 
         if (harvestSlots.has(key) || occupied.has(key)) {
+            continue;
+        }
+
+        if (upgradeSpots.has(key)) {
             continue;
         }
 
@@ -1798,6 +1809,7 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
         if (
             !occupied.has(key) &&
             !harvestSlots.has(key) &&
+            !upgradeSpots.has(key) &&
             key !== here &&
             room.getTerrain().get(cached.x, cached.y) !== WALL_TERRAIN
         ) {
