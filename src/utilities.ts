@@ -10,6 +10,7 @@ import {
     HARVEST_RATE_PER_WORK,
     DELIVERY_TARGET_TTL,
     DELIVERY_FATIGUE_FACTOR,
+    DELIVERY_NEAR_TILES,
     SPAWN_FEED_PRIORITY,
     RESCUE_HARVESTER_BODIES,
     UNREACHABLE_DELIVERY_DISTANCE,
@@ -572,28 +573,50 @@ export function findEnergyTransferTarget(
     const harvestTile = creep.memory._harvestTile;
 
     if (harvestTile) {
-        const adjacent = new Set<string>();
+        // Хранилище, до которого далеко, целью быть не может: дорога по
+        // болоту в 12–15 клеток стоит крипу сотни тиков, а всё это время он
+        // не добывает.
+        //
+        // В E34S53 (23.11.2026) единственное хранилище со свободным местом
+        // рядом с источником — контейнер на (19,21) — от клетки добычи
+        // (20,24) отстояло на 12 клеток пути: единственный короткий проход
+        // вёл через (20,22), занятую другим харвестером, и крюк шёл через
+        // полкомнаты. Харвестер брал эту цель, уходил с клетки добычи с
+        // полным рюкзаком, доход комнаты падал с 4.0 до 2.36 энергии в
+        // тик, а энергия в рюкзаке до контроллера не доносилась вовсе.
+        //
+        // «Рядом» — это до двух клеток от своей клетки добычи: шаг (сдача
+        // с клетки) или два шага (сдача из соседней клетки). Всё, что
+        // дальше, — это уже дорога, и энергия рюкзака идёт в контроллер на
+        // месте (см. `upgradeRoomController` в роли `harvester`).
+        const nearby = pool.filter(
+            (c) =>
+                Math.max(
+                    Math.abs(c.pos.x - harvestTile.x),
+                    Math.abs(c.pos.y - harvestTile.y)
+                ) <= DELIVERY_NEAR_TILES
+        );
 
-        for (let dx = -1; dx <= 1; dx++) {
-            for (let dy = -1; dy <= 1; dy++) {
-                adjacent.add(`${harvestTile.x + dx},${harvestTile.y + dy}`);
-            }
+        if (nearby.length === 0) {
+            // Рядом сдать некуда — не идём в другой конец комнаты.
+            return null;
         }
 
-        const local = pool.filter((c) => adjacent.has(`${c.pos.x},${c.pos.y}`));
+        // Среди «рядом» приоритет у самого близкого: сдавать с клетки
+        // добычи (шаг) лучше, чем из соседней (два шага).
+        nearby.sort(
+            (a, b) =>
+                Math.max(
+                    Math.abs(a.pos.x - harvestTile.x),
+                    Math.abs(a.pos.y - harvestTile.y)
+                ) -
+                Math.max(
+                    Math.abs(b.pos.x - harvestTile.x),
+                    Math.abs(b.pos.y - harvestTile.y)
+                )
+        );
 
-        if (local.length > 0) {
-            pool = local;
-        } else {
-            const localAll = candidates.filter((c) =>
-                adjacent.has(`${c.pos.x},${c.pos.y}`)
-            );
-
-            if (localAll.length > 0) {
-                // Рядом всё занято — не идём в другой конец комнаты.
-                return null;
-            }
-        }
+        pool = nearby;
     }
 
     // Пока в выбранном хранилище есть место, харвестер ходит в него.
@@ -615,7 +638,21 @@ export function findEnergyTransferTarget(
     if (cached && Game.time - cached.tick < DELIVERY_TARGET_TTL) {
         const found = pool.find((c) => c.id === cached.id);
 
-        if (found) {
+        // Кэш не должен предлагать цель, до которой **не дойти**.
+        //
+        // Достижимость считается по модели движка (крипы — препятствия), и
+        // она меняется на каждом тике: харвестер на (20,24) в E34S53
+        // (23.11.2026) держал в кэше контейнер на (19,21) — единственное
+        // хранилище со свободным местом рядом с источником, — хотя до него
+        // было не дойти: единственный проход вёл через клетку (20,22),
+        // занятую другим харвестером. Крип 25 тиков шёл к недостижимой
+        // цели, бросал клетку добычи и уходил с полным рюкзаком через весь
+        // запад комнаты; доход падал с 4.0 до 2.36 энергии в тик.
+        //
+        // Проверка дешёвая: `deliveryPathDistance` возвращает 0 без поиска
+        // пути, когда крип уже в зоне передачи, — то есть в обычном случае
+        // (сдача с клетки добычи) путь не ищется вовсе.
+        if (found && deliveryPathDistance(creep, found) >= 0) {
             return found;
         }
     }
@@ -642,27 +679,18 @@ export function findEnergyTransferTarget(
     let bestRate = 0;
     let bestDistance = Number.POSITIVE_INFINITY;
 
-    // Последний вариант: хранилище, до которого не дойти. К нему можно
-    // вернуться, если другого выбора нет, но выбирать его по умолчанию
-    // нельзя — крип будет стоять с полным рюкзаком.
-    let unreachable: AnyStoreStructure | null = null;
-    let unreachableBy = Number.POSITIVE_INFINITY;
-
+    // Хранилище, до которого не дойти, целью быть не может: крип пойдёт
+    // к нему, но не придёт — и останется стоять с полным рюкзаком, бросив
+    // клетку добычи. В E34S53 (23.11.2026) это стоило комнате трети
+    // дохода: харвестер на (20,24) уходил с грузом через весь запад комнаты
+    // к контейнеру на (19,21) — единственному хранилищу со свободным местом
+    // рядом с источником, — хотя до него было не дойти (проход через
+    // (20,22) занят другим харвестером).
     for (const candidate of pool) {
         const tripLoad = deliveryTripLoad(creep, candidate);
         const distance = deliveryPathDistance(creep, candidate);
 
         if (distance < 0) {
-            const straight = Math.max(
-                Math.abs(candidate.pos.x - creep.pos.x),
-                Math.abs(candidate.pos.y - creep.pos.y)
-            );
-
-            if (straight < unreachableBy) {
-                unreachableBy = straight;
-                unreachable = candidate;
-            }
-
             continue;
         }
 
@@ -707,7 +735,22 @@ export function findEnergyTransferTarget(
     }
 
     if (!best) {
-        best = unreachable;
+        // Ни одно хранилище недостижимо.
+        //
+        // Хранилище, до которого не дойти, целью быть не может: крип пойдёт
+        // к нему, но не придёт — и останется стоять с полным рюкзаком,
+        // бросив клетку добычи. В E34S53 (23.11.2026) это стоило комнате
+        // трети дохода: харвестер на (20,24) уходил с грузом через весь
+        // запад комнаты к контейнеру на (19,21) — единственному
+        // хранилищу со свободным местом рядом с источником, — хотя до
+        // него было не дойти (проход через (20,22) занят другим
+        // харвестером).
+        //
+        // Вместо цели сдачи энергия рюкзака идёт в контроллер на месте (см.
+        // `upgradeRoomController` в роли `harvester`). Цель пересчитывается
+        // каждый тик, и как только проход освободится, харвестер сдаст
+        // энергию сам.
+        return null;
     }
 
     if (best) {
