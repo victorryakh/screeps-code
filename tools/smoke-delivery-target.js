@@ -419,6 +419,9 @@ function actions(creep, kind) {
         JSON.stringify(transfers.map((m) => `${m[1]},${m[2]}`)));
     check('a harvester with no free storage next to its tile upgrades the controller on the spot',
         upgrades.length > 0);
+    check('a harvester with no free storage next to its tile keeps digging',
+        actions(creep, 'harvest').length > 0,
+        JSON.stringify(actions(creep, 'harvest')));
 }
 
 // --- Case 2: the storage next to the harvest tile has free space -----------
@@ -465,6 +468,35 @@ function actions(creep, kind) {
     check('a harvester with a free storage next to its tile delivers there',
         transfers.length === 1 && transfers[0][1] === 19 && transfers[0][2] === 21,
         JSON.stringify(transfers.map((m) => `${m[1]},${m[2]}`)));
+}
+
+// --- Case 4: a harvester without a delivery target keeps digging ----------
+// The harvester has no storage to deliver to, so its energy goes into the
+// controller. It must not stop working: it has to go back to its harvest
+// tile and dig. Before the fix the harvester stood still with a full
+// backpack until the backpack ran empty, and the room earned 2.0 energy per
+// tick instead of 4.0.
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 0, { _harvestTile: { x: 20, y: 22 } }],
+            [20, 26, 'harvester', 100, { _harvestTile: { x: 20, y: 24 } }],
+            [21, 21, 'harvester', 0, {}],
+            [20, 21, 'upgrader', 30, {}],
+            [16, 21, 'builder', 0, {}]
+        ]
+    });
+    runTick(sim);
+    const creep = sim.creeps[1];
+    const moves = actions(creep, 'moveTo');
+    const harvests = actions(creep, 'harvest');
+
+    check('a harvester without a delivery target goes back to its harvest tile',
+        moves.length > 0 && moves[0][1] === 20 && moves[0][2] === 24,
+        JSON.stringify(moves.map((m) => `${m[1]},${m[2]}`)));
+    check('a harvester without a delivery target does not stand still',
+        moves.length > 0,
+        JSON.stringify(harvests));
 }
 
 const failed = results.filter((r) => !r.ok);
