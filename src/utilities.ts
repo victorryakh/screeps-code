@@ -92,6 +92,19 @@ export function moveCached(
         if (result === OK || result === ERR_TIRED) {
             return result;
         }
+
+        // Кэш пути непригоден: маршрут перекрыт крипом, который встал на
+        // клетку маршрута, либо крип вообще с него сбился
+        // (`moveByPath` отвечает `ERR_NOT_FOUND`, когда текущей клетки в
+        // маршруте нет).
+        //
+        // Такой кэш надо сбрасывать, иначе следующий вызов `moveTo` с тем
+        // же `reusePath` снова возьмёт тот же маршрут и снова упрётся в
+        // занятую клетку. В E34S53 (24.11.2026) харвестер на (20,23) так и
+        // стоял: единственный проход к его цели перекрыл другой харвестер,
+        // движок молча отказывал в движении по занятой клетке, а бот считал,
+        // что крип идёт, — и не добывал энергию до конца жизни.
+        delete creep.memory._move;
     }
 
     // «Отравленный» кэш пути.
@@ -750,6 +763,11 @@ export function findEnergyTransferTarget(
         // `upgradeRoomController` в роли `harvester`). Цель пересчитывается
         // каждый тик, и как только проход освободится, харвестер сдаст
         // энергию сам.
+        //
+        // Старую цель надо забыть: она больше не цель, и оставить её в
+        // памяти — значит оставить в памяти маршрут, которого нет.
+        delete creep.memory._deliveryTarget;
+
         return null;
     }
 
@@ -830,8 +848,51 @@ export function deliveryTripLoad(
  */
 function creepObstacleMatrix(creep: Creep): CostMatrix {
     const matrix = new PathFinder.CostMatrix();
+    const room = creep.room;
 
-    for (const other of creep.room.find(FIND_CREEPS)) {
+    // Постройки — препятствия для движения.
+    //
+    // Матрица, которую движок строит для `Room.findPath` (а значит и для
+    // `Creep.moveTo`), помечает все структуры из `OBSTACLE_OBJECT_TYPES`
+    // как непроходимые: `screeps/engine`, `src/game/rooms.js`,
+    // `makePathfindingGrid2` — `costs.set(object.x, object.y, 0xFF)`.
+    //
+    // Матрица, которую отдаёт `roomCallback`, **заменяет** базовую сетку
+    // комнаты: движок берёт ровно её. Стены рельефа он учитывает сам, а
+    // вот постройки — нет. Если их не пометить, путь считается сквозь башни
+    // и расширения, и бот выбирает цель, до которой крип физически не
+    // дойдёт.
+    //
+    // Что это значило в E34S53 (24.11.2026): источник (19,23) лежит в
+    // тупике, клетки добычи — (20,22), (20,23), (20,24) — вытянуты в цепочку
+    // шириной в одну клетку, а башни (21,22) и (21,23) закрывают восточный
+    // обход. Матрица без постройк считала, что до расширения (21,25) от
+    // клетки (20,23) можно дойти за два шага — сквозь башню. Харвестер
+    // выбирал такую цель, `moveTo` возвращал `ERR_NO_PATH`, а код сдачи
+    // энергии этот код игнорировал: крип замирал с полным рюкзаком, не
+    // добывал и не качал контроллер — до конца своей жизни.
+    for (const structure of room.find(FIND_STRUCTURES)) {
+        if (BIRTH_BLOCKING_TYPES.indexOf(structure.structureType) === -1) {
+            continue;
+        }
+
+        matrix.set(structure.pos.x, structure.pos.y, 255);
+    }
+
+    // Площадки построек тоже занимают клетку — но только те, чья структура
+    // сама является препятствием. Движок считает площадку расширения или
+    // башни непроходимой (`object.type == 'constructionSite' && ... &&
+    // OBSTACLE_OBJECT_TYPES`), а площадку контейнера или дороги — нет.
+    for (const site of room.find(FIND_MY_CONSTRUCTION_SITES)) {
+        if (BIRTH_BLOCKING_TYPES.indexOf(site.structureType) === -1) {
+            continue;
+        }
+
+        matrix.set(site.pos.x, site.pos.y, 255);
+    }
+
+    // Крипы — препятствия: движок не поставит крипа на занятую клетку.
+    for (const other of room.find(FIND_CREEPS)) {
         if (other.name === creep.name) {
             continue;
         }
