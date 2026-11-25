@@ -1529,6 +1529,37 @@ function actions(creep, kind) {
         JSON.stringify(moves.map((m) => `${m[1]},${m[2]}`)));
 }
 
+// --- Scenario 26: место ожидания не делят на двоих -------------------------
+// Свободных клеток, откуда в карман входят за один шаг, в E34S53 всего одна
+// — (21,21). Если её занимают двое, они вытесняют друг друга: апгрейдер без
+// донора уходит добывать сам и встаёт на это же место, а харвестер без клетки
+// добычи сходит с него — и они ходят по очереди туда-обратно, не делая
+// работы. Место ожидания закрепляется за крипом, как клетка апгрейда.
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 0, { _harvestTile: { x: 20, y: 22 } }],
+            [20, 23, 'harvester', 0, { _harvestTile: { x: 20, y: 23 } }],
+            [20, 24, 'harvester', 0, { _harvestTile: { x: 20, y: 24 } }],
+            [21, 21, 'harvester', 0, {}],
+            [20, 20, 'harvester', 0, {}]
+        ],
+        spawnEnergy: 300
+    });
+
+    runTicks(sim, 2);
+
+    const keys = sim.creeps
+        .slice(3)
+        .map((c) => c.memory._waitSpot)
+        .filter(Boolean)
+        .map((s) => `${s.x},${s.y}`);
+
+    check('two idle harvesters do not share a waiting spot',
+        keys.length >= 1 && new Set(keys).size === keys.length,
+        JSON.stringify(keys));
+}
+
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length === 0 ? 0 : 1);

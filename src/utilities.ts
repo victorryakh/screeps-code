@@ -1890,6 +1890,31 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
     const free: RoomPosition[] = [];
     const offRing: RoomPosition[] = [];
 
+    // Место ожидания — ресурс ограниченный: свободных клеток, откуда в
+    // карман входят за один шаг, в E34S53 всего одна — (21,21). Если её
+    // займут двое, они начнут вытеснять друг друга: апгрейдер, которому не
+    // нашлось донора, уходит добывать сам и встаёт на это же место, а
+    // харвестер без клетки добычи сходит с него — и они ходят по очереди
+    // туда-обратно, не делая работы (25.11.2026).
+    //
+    // Поэтому место ожидания закрепляется за крипом, как и клетка апгрейда
+    // (см. `_upgradeSpots`): претензия умирает вместе с крипом.
+    const claims = (room.memory._waitSpots ??= {});
+
+    for (const key in claims) {
+        const owner = claims[key];
+
+        if (owner === undefined || !Game.creeps[owner]) {
+            delete claims[key];
+        }
+    }
+
+    const claimedByOther = (key: string): boolean => {
+        const owner = claims[key];
+
+        return owner !== undefined && owner !== creep.name;
+    };
+
     // Пригодна ли клетка, на которой крип стоит прямо сейчас, как место
     // ожидания: свободна, не клетка добычи, не рабочее место апгрейда и не
     // кольцо рождения.
@@ -1935,7 +1960,7 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
 
         if (isHere) {
             // Крип уже стоит на пригодной клетке — ждать можно здесь.
-            hereUsable = !ring.has(key);
+            hereUsable = !ring.has(key) && !claimedByOther(key);
 
             continue;
         }
@@ -1952,6 +1977,9 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
     // Крип стоит на клетке, с которой в карман входят за один шаг: ждать
     // надо здесь, путь искать не к чему.
     if (hereUsable) {
+        const key = `${creep.pos.x},${creep.pos.y}`;
+
+        claims[key] = creep.name;
         creep.memory._waitSpot = { x: creep.pos.x, y: creep.pos.y };
 
         return creep.pos;
@@ -1968,7 +1996,13 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
         return null;
     }
 
-    const goals = offRing.length > 0 ? offRing : free;
+    const goals = (offRing.length > 0 ? offRing : free).filter(
+        (pos) => !claimedByOther(`${pos.x},${pos.y}`)
+    );
+
+    if (goals.length === 0) {
+        return null;
+    }
 
     // Клетка ожидания запоминается: пересчитывать её каждый тик нельзя —
     // «ближайшая» клетка меняется по мере того, как крип к ней идёт, и
@@ -1984,8 +2018,11 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
             !harvestSlots.has(key) &&
             !upgradeSpots.has(key) &&
             key !== here &&
+            !claimedByOther(key) &&
             room.getTerrain().get(cached.x, cached.y) !== WALL_TERRAIN
         ) {
+            claims[key] = creep.name;
+
             return new RoomPosition(cached.x, cached.y, room.name);
         }
 
@@ -2029,6 +2066,7 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
             return null;
         }
 
+        claims[`${found.x},${found.y}`] = creep.name;
         creep.memory._waitSpot = { x: found.x, y: found.y };
 
         return found;
