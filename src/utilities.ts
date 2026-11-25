@@ -311,7 +311,7 @@ export function harvestEnergy(
     }
 
     if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        const { usable, blocked } = findHarvestTiles(creep, source);
+        const { usable } = findHarvestTiles(creep, source);
 
         for (const tile of usable) {
             const result = moveCached(creep, tile, opts);
@@ -352,18 +352,19 @@ export function harvestEnergy(
             return moveCached(creep, waiting, opts);
         }
 
-        // Ждать негде: крип заперт в собственном тупике. Тогда хотя бы
-        // нацелимся на клетку добычи — когда её освободят, крип дойдёт.
-        for (const tile of blocked) {
-            const result = moveCached(creep, tile, opts);
-
-            if (result === OK || result === ERR_TIRED) {
-                return result;
-            }
-        }
-
-        // Ни одной соседней клетки нет — пробуем цель напрямую.
-        return moveCached(creep, source, opts);
+        // Ждать негде: крип заперт в собственном тупике.
+        //
+        // **Гнаться за недостижимыми клетками добычи нельзя.** Клетки в
+        // `blocked` — это те, до которых не дойти: они отрезаны нашими же
+        // крипами, и движок к такой цели построит путь только до ближайшей
+        // достижимой клетки. Крип пойдёт «в ту сторону» и останется стоять
+        // на полпути — в E34S53 (25.11.2026) харвестер так и ходил кругами
+        // между (20,20), (21,21) и (22,22), не добывая ничего.
+        //
+        // Лучше стоять на месте: как только клетка освободится, её
+        // достижимость проверится сама (см. `findHarvestTiles` — он зовётся
+        // каждый тик), и крип пойдёт на неё.
+        return OK;
     }
 
     // Клетка, на которой крип реально копает, и есть его клетка добычи.
@@ -1957,6 +1958,13 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
     }
 
     if (free.length === 0) {
+        creep.memory._waitDebug = {
+            pos: here,
+            why: 'no free delivery tile',
+            tiles: collectDeliveryTileKeys(room).size,
+            occupied: occupied.size
+        };
+
         return null;
     }
 
@@ -1993,6 +2001,12 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
         );
 
         if (!path || !path.path || path.path.length === 0) {
+            creep.memory._waitDebug = {
+                pos: here,
+                why: 'path search failed',
+                goals: goals.map((p) => `${p.x},${p.y}`).join(' ')
+            };
+
             return null;
         }
 
@@ -2005,6 +2019,13 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
         const found = goals.find((pos) => pos.x === end.x && pos.y === end.y);
 
         if (!found) {
+            creep.memory._waitDebug = {
+                pos: here,
+                why: 'path end is not a goal',
+                end: `${end.x},${end.y}`,
+                goals: goals.map((p) => `${p.x},${p.y}`).join(' ')
+            };
+
             return null;
         }
 

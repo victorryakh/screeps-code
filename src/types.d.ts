@@ -85,6 +85,18 @@ declare global {
             y: number;
         };
         /**
+         * Диагностика места ожидания (временно): почему
+         * `findHarvestWaitingSpot` не нашёл клетку.
+         */
+        _waitDebug?: {
+            pos: string;
+            why: string;
+            goals?: string;
+            end?: string;
+            tiles?: number;
+            occupied?: number;
+        };
+        /**
          * Клетка добычи, закреплённая за крипом (см. `findHarvestTiles`).
          * Распределение клеток должно быть устойчивым: если каждый тик
          * брать ближайшую, харвестеры меняются местами и не копает никто.
