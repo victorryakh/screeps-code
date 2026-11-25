@@ -1909,6 +1909,16 @@ export function findHarvestWaitingSpot(creep: Creep): RoomPosition | null {
         }
     }
 
+    // Кто занял клетку добычи — больше не ждёт и место ожидания отпускает:
+    // иначе «горячий резерв» держит клетку в кармане, а следующий харвестер
+    // без клетки добычи не может встать ждать рядом и топчется у входа.
+    const ownKey = `${creep.pos.x},${creep.pos.y}`;
+
+    if (harvestSlots.has(ownKey) && claims[ownKey] === creep.name) {
+        delete claims[ownKey];
+        delete creep.memory._waitSpot;
+    }
+
     const claimedByOther = (key: string): boolean => {
         const owner = claims[key];
 
