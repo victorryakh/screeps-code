@@ -1475,6 +1475,9 @@ function markExcessWorkers(
  *   1 WORK, но часть энергии теряется на дороге до спавна и обратно.
  * - Крипы умирают от старости на 1500-м тике, и замену нужно оплатить из
  *   того же дохода — иначе колония постепенно теряет роли.
+ * - Энергия харвестеров, уходящая в контроллер на месте, уже занята (см.
+ *   {@link committedInPlaceUpgrade}): обещать её билдеру или второму
+ *   апгрейдеру нельзя — кормить их будет нечем.
  *
  * Если бюджет не считать, бот будет планировать состав по одному только RCL
  * и заведёт в комнату больше рабочих крипов, чем она может прокормить: в
@@ -1509,9 +1512,68 @@ function computeWorkBudget(room: Room, counts: Record<string, number>): number {
         churn += bodyCost(creep.body.map((part) => part.type)) / CREEP_LIFE_TICKS;
     }
 
-    room.memory._workBudget = Math.max(0, income - churn);
+    const committed = committedInPlaceUpgrade(room);
+
+    room.memory._workBudget = Math.max(0, income - churn - committed);
 
     return room.memory._workBudget;
+}
+
+/**
+ * Сколько энергии в тик харвестеры уже вкладывают в апгрейд контроллера
+ * на месте.
+ *
+ * @remarks
+ * Эта энергия **уже занята**: она идёт из добычи прямо в контроллер, минуя
+ * структуры, и на неё нельзя рассчитывать ни билдеру, ни второму
+ * апгрейдеру. Если её не вычесть, бюджет комнаты обещает рабочих, которых
+ * кормить нечем.
+ *
+ * Считается по тем харвестерам, откуда виден контроллер: `upgradeController`
+ * работает с расстояния {@link UPGRADE_RANGE}, и только такой харвестер
+ * кладёт в контроллер энергию на месте. Движок списывает по одной энергии
+ * за тик на каждую часть WORK, поэтому ставка харвестера равна числу его
+ * WORK-частей.
+ *
+ * В E34S53 (25.11.2026) это была ровно та причина, по которой апгрейдер
+ * голодал: харвестер с одним WORK клал в контейнер 1 энергию в тик, а
+ * апгрейдер с двумя WORK выпивал 2 — и, не найдя донора, падал в добычу и
+ * занимал клетку добычи у харвестера. С двумя WORK у харвестера приток и
+ * аппетит сравнялись (2 в тик), и аппетит апгрейдера стал отдельной
+ * величиной, а не частью дохода харвестера.
+ *
+ * @param room Комната.
+ * @returns Занятая харвестерами энергия в тик.
+ */
+function committedInPlaceUpgrade(room: Room): number {
+    const controller = room.controller;
+
+    if (!controller) {
+        return 0;
+    }
+
+    let total = 0;
+
+    for (const creep of room.find(FIND_MY_CREEPS)) {
+        if (creep.memory.role !== ROLE.HARVESTER) {
+            continue;
+        }
+
+        const dx = Math.abs(creep.pos.x - controller.pos.x);
+        const dy = Math.abs(creep.pos.y - controller.pos.y);
+
+        if (Math.max(dx, dy) > UPGRADE_RANGE) {
+            continue;
+        }
+
+        for (const part of creep.body) {
+            if (part.type === WORK) {
+                total += 1;
+            }
+        }
+    }
+
+    return total;
 }
 
 /**

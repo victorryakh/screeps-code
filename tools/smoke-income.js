@@ -173,10 +173,10 @@ function near(a, b) {
 }
 
 const BODIES = {
-    // The real harvester body (see `bodyFor`): a 100-energy backpack and two
-    // MOVE parts. The mock must match it, otherwise the delivery rules are
-    // exercised on a body the bot never spawns.
-    harvester: ['work', 'carry', 'carry', 'move', 'move'],
+    // The real harvester body (see `bodyFor`): two WORK parts, a 50-energy
+    // backpack and one MOVE. The mock must match it, otherwise the delivery
+    // rules are exercised on a body the bot never spawns.
+    harvester: ['work', 'work', 'carry', 'move'],
     upgrader: ['work', 'work', 'carry', 'move'],
     builder: ['work', 'carry', 'carry', 'move', 'move'],
     repairer: ['work', 'carry', 'move', 'move']
@@ -217,7 +217,9 @@ function makeCreep(x, y, role, energy, extra) {
                 return ERR_NOT_IN_RANGE;
             }
             this.actions.push(['harvest', source.pos.x, source.pos.y]);
-            const got = Math.min(2, store.getFreeCapacity(), source.energy);
+            // The engine gives 2 energy per tick per WORK part.
+            const work = bodyParts.filter((p) => p.type === 'work').length;
+            const got = Math.min(2 * work, store.getFreeCapacity(), source.energy);
             store.energy += got;
             source.energy -= got;
             return OK;
@@ -428,11 +430,19 @@ function actions(creep, kind) {
     return creep.actions.filter((a) => a[0] === kind);
 }
 
-// --- Scenario 1: the harvester body is built for long trips ----------------
+// --- Scenario 1: the harvester body is built for the delivery in place ----
 // The source of E34S53 sits in a wall pocket: three harvest tiles, all on
-// swamp, and the delivery point is ~10 tiles away behind a wall block. A
-// [work,carry,move] runner spends two thirds of its life walking: the room
-// produced 1.4 energy/tick instead of the modelled 4.2.
+// swamp. The storages stand right next to them - the container on (19,21)
+// is one cell from the tile (20,22), the extension on (21,24) is one cell
+// from the tile (20,24) - so the harvester never walks: it hands the energy
+// over from its own tile.
+//
+// With that geometry a 100-energy backpack and two MOVE parts are dead
+// weight: the load of a trip is capped at DELIVERY_MIN_TRIP (50) anyway,
+// and the creep does not move. Two WORK parts are what pay: the harvest
+// rate doubles (2 energy per tick per WORK) and so does the rate of the
+// in-place upgrade of the controller, which is the cheapest way to turn
+// harvest into progress.
 {
     const sim = makeRoom({ creeps: [] });
     runTicks(sim, 1);
@@ -440,11 +450,11 @@ function actions(creep, kind) {
     const attempt = sim.spawnAttempts.find((a) => a.role === 'harvester');
     const body = attempt ? attempt.body : [];
 
-    check('the harvester has a 100-energy backpack',
-        body.filter((p) => p === 'carry').length === 2,
+    check('the harvester digs twice as fast',
+        body.filter((p) => p === 'work').length === 2,
         body.join(','));
-    check('the harvester moves twice as fast on swamp',
-        body.filter((p) => p === 'move').length === 2,
+    check('the harvester carries a trip of 50 energy',
+        body.filter((p) => p === 'carry').length === 1,
         body.join(','));
     check('the harvester still fits into the RCL 1 spawn (300 energy)',
         attempt && attempt.cost <= 300,
@@ -1452,6 +1462,71 @@ function actions(creep, kind) {
     check('a site far from the harvest tiles is dropped',
         dropped.indexOf('21,28') !== -1,
         JSON.stringify({ kept, dropped }));
+}
+
+// --- Scenario 24: the energy of the harvesters is already committed -------
+// The harvesters stand on their harvest tiles, from which the controller is
+// visible: every tick they put one energy per WORK part straight into the
+// controller. That energy is spent - it cannot also feed a builder or a
+// second upgrader.
+//
+// Without this rule the budget promises workers the room cannot feed: in
+// E34S53 (25.11.2026) the harvesters committed 2 energy per tick, the
+// measured income was 4.2, and the room planned a builder on top of that -
+// energy nobody had.
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 0],
+            [20, 24, 'harvester', 0],
+            [20, 21, 'upgrader', 50]
+        ],
+        spawnEnergy: 300
+    });
+
+    // The optimistic model: 3 harvest tiles x 2 energy per tick x 0.7.
+    delete sim.room.memory._incomeRate;
+    sim.room.memory._budgetCheckTick = 0;
+
+    runTicks(sim, 2);
+
+    const spawned = sim.spawnAttempts.map((a) => a.role);
+
+    check('the budget does not promise a worker the harvesters already feed',
+        !spawned.includes('builder'),
+        JSON.stringify(spawned));
+}
+
+// --- Scenario 25: a harvester without a harvest tile waits next to the
+// pocket instead of wandering ----------------------------------------------
+// All three harvest tiles are taken. The harvester on (21,21) stands where
+// it can enter the pocket in one step, so that is where it waits: it must
+// not set off for a tile it cannot reach.
+//
+// Before the fix the waiting spot was looked up with a path search, and a
+// path search to the tile the creep already stands on returns an EMPTY path.
+// The code read that as "nowhere to wait" and the harvester went after the
+// unreachable harvest tiles instead: in E34S53 it walked between (20,20),
+// (21,21) and (22,22) for the whole life, with an empty action log.
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 0, { _harvestTile: { x: 20, y: 22 } }],
+            [20, 23, 'harvester', 0, { _harvestTile: { x: 20, y: 23 } }],
+            [20, 24, 'harvester', 0, { _harvestTile: { x: 20, y: 24 } }],
+            [21, 21, 'harvester', 0, {}]
+        ],
+        spawnEnergy: 300
+    });
+
+    runTicks(sim, 1);
+
+    const waiting = sim.creeps[3];
+    const moves = actions(waiting, 'moveTo');
+
+    check('the harvester without a harvest tile stays where it waits',
+        moves.length === 0,
+        JSON.stringify(moves.map((m) => `${m[1]},${m[2]}`)));
 }
 
 const failed = results.filter((r) => !r.ok);
