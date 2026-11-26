@@ -168,17 +168,23 @@ function near(a, b) {
 }
 
 const BODIES = {
-    harvester: ['work', 'carry', 'carry', 'move', 'move'],
+    // The real harvester body (see `bodyFor`): two WORK parts, one CARRY
+    // part - a 50-energy backpack. The mock must match it, otherwise the
+    // delivery rules are exercised on a body the bot never spawns.
+    harvester: ['work', 'work', 'carry', 'move'],
     upgrader: ['work', 'work', 'carry', 'move'],
     builder: ['work', 'carry', 'carry', 'move', 'move'],
     repairer: ['work', 'carry', 'move', 'move']
 };
 
 function makeCreep(x, y, role, energy, memory) {
+    const bodyParts = (BODIES[role] || BODIES.harvester).map((type) => ({ type, hits: 100 }));
+    const capacity = bodyParts.filter((p) => p.type === 'carry').length * 50;
+    const workParts = bodyParts.filter((p) => p.type === 'work').length;
     const store = {
         energy: energy || 0,
-        getCapacity() { return 100; },
-        getFreeCapacity() { return 100 - this.energy; }
+        getCapacity() { return capacity; },
+        getFreeCapacity() { return Math.max(0, capacity - this.energy); }
     };
 
     return {
@@ -189,7 +195,7 @@ function makeCreep(x, y, role, energy, memory) {
         hitsMax: 300,
         fatigue: 0,
         store,
-        body: (BODIES[role] || BODIES.harvester).map((type) => ({ type, hits: 100 })),
+        body: bodyParts,
         memory: Object.assign({ role, homeRoom: 'E34S53' }, memory || {}),
         room: null,
         actions: [],
@@ -199,7 +205,8 @@ function makeCreep(x, y, role, energy, memory) {
                 return ERR_NOT_IN_RANGE;
             }
             this.actions.push(['harvest', source.pos.x, source.pos.y]);
-            const got = Math.min(2, store.getFreeCapacity(), source.energy);
+            // The engine gives 2 energy per tick per WORK part.
+            const got = Math.min(2 * workParts, store.getFreeCapacity(), source.energy);
             store.energy += got;
             source.energy -= got;
             return OK;
@@ -224,6 +231,10 @@ function makeCreep(x, y, role, energy, memory) {
                 return ERR_NOT_IN_RANGE;
             }
             this.actions.push(['upgrade']);
+            // The engine spends one energy per WORK part per tick out of the
+            // backpack: that is what keeps the backpack two energy below its
+            // capacity while the harvester digs and upgrades in the same tick.
+            store.energy -= Math.min(store.energy, workParts);
             return OK;
         },
         transfer(target) {

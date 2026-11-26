@@ -27,6 +27,12 @@
  *      upgrade intent.
  *   3. A harvester with a full backpack still delivers the energy to the
  *      storage - the fix must not break the delivery.
+ *   4. A harvester that upgrades on the spot still delivers: the upgrade
+ *      takes one energy per WORK part per tick out of the backpack, so the
+ *      store balances out two energy below its capacity (48 of 50). The
+ *      delivery threshold used to be the whole trip (50) - unreachable, so
+ *      the harvester never delivered anything and half of the harvest rotted
+ *      on the floor (E34S53, 26.11.2026). The threshold is half a trip now.
  *
  * Usage:
  *   bun run build && node tools/smoke-harvester-upgrade.js
@@ -271,12 +277,16 @@ function makeRoom(opts) {
         fatigue: 0,
         store: {
             energy: (memory && memory.energy) || 0,
-            getFreeCapacity() { return 100 - this.energy; },
+            // The real harvester body (see `bodyFor`): two WORK parts, one
+            // CARRY part - a 50-energy backpack. The mock must match it,
+            // otherwise the delivery rules are exercised on a body the bot
+            // never spawns.
+            getFreeCapacity() { return 50 - this.energy; },
             getUsedCapacity() { return this.energy; }
         },
         body: [
-            { type: 'work', hits: 100 }, { type: 'carry', hits: 100 }, { type: 'carry', hits: 100 },
-            { type: 'move', hits: 100 }, { type: 'move', hits: 100 }
+            { type: 'work', hits: 100 }, { type: 'work', hits: 100 },
+            { type: 'carry', hits: 100 }, { type: 'move', hits: 100 }
         ],
         memory: Object.assign({ role, homeRoom: 'E34S53' }, memory || {}),
         room: null,
@@ -300,6 +310,12 @@ function makeRoom(opts) {
                 return ERR_NOT_ENOUGH_ENERGY;
             }
 
+            // The engine spends one energy per WORK part per tick out of the
+            // backpack: that is what keeps the backpack two energy below its
+            // capacity while the harvester digs and upgrades in the same tick.
+            const work = this.body.filter((p) => p.type === 'work').length;
+            this.store.energy -= Math.min(this.store.energy, work);
+
             upgrades.push([this.name, this.pos.x, this.pos.y]);
             return OK;
         },
@@ -317,7 +333,8 @@ function makeRoom(opts) {
             // `upgradeController` is executed later in the same tick - so a
             // creep that harvests 2 energy can spend 1 of them on the
             // controller right away, with an empty backpack beforehand.
-            this.store.energy += 2;
+            const work = this.body.filter((p) => p.type === 'work').length;
+            this.store.energy += 2 * work;
             return OK;
         },
         transfer(target) {
@@ -541,6 +558,35 @@ function runTick(sim) {
     check('a foreign controller is not upgraded',
         upgrades.length === 0,
         JSON.stringify(upgrades));
+}
+
+// --- Scenario 5: the in-place equilibrium does not block the delivery -----
+//
+// 26.11.2026: the harvester upgrades the controller on the spot, and the
+// engine takes one energy per WORK part per tick out of the backpack. With
+// two WORK parts the store stands at 48 of 50 and never grows - the harvester
+// harvests 2 energy per WORK, the upgrade takes 1, so the backpack balances
+// out two energy below its capacity.
+//
+// The delivery threshold used to be the whole trip (50), so the harvester
+// never delivered anything at all: the source was drained at 8 energy/tick,
+// 4 of it went into the controller and 2 fell on the floor and rotted there.
+// The extensions stayed empty, the builder had no donor (the spawn is
+// excluded from its donors) and the upgrader never appeared.
+//
+// The threshold is half a trip now, so the equilibrium is always reachable.
+{
+    const sim = makeRoom({
+        extensions: EXTENSIONS,
+        creeps: [[20, 23, 'harvester', { _harvestTile: { x: 20, y: 23 }, energy: 48 }]]
+    });
+    global.Memory = {};
+
+    runTick(sim);
+
+    check('a harvester at the in-place equilibrium delivers the energy',
+        transfers.length === 1 && transfers[0][1] === C.STRUCTURE_CONTAINER,
+        JSON.stringify(transfers));
 }
 
 const failed = results.filter((r) => !r.ok).length;

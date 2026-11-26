@@ -8,6 +8,7 @@ import {
     UPGRADE_SPOT_VERSION,
     UPGRADE_SPOT_TTL,
     HARVEST_RATE_PER_WORK,
+    CARRY_CAPACITY,
     DELIVERY_TARGET_TTL,
     DELIVERY_FATIGUE_FACTOR,
     DELIVERY_NEAR_TILES,
@@ -847,6 +848,45 @@ export function deliveryTripLoad(
     const free = target.store.getFreeCapacity(RESOURCE_ENERGY) ?? 0;
 
     return Math.max(1, Math.min(free, Math.max(1, backpack)));
+}
+
+/**
+ * Сколько энергии харвестер может накопить в рюкзаке, ничего не теряя.
+ *
+ * @remarks
+ * Рюкзак — это 50 энергий на часть CARRY, но апгрейд контроллера на месте
+ * забирает из рюкзака по одной энергии на часть WORK за тик, а добыча даёт
+ * по две. Поэтому рюкзак упирается не в свою ёмкость, а в
+ * `ёмкость − WORK`: дальше добыча уже не помещается, и лишнее падает на пол.
+ *
+ * С телом [WORK, WORK, CARRY, MOVE] это 48 из 50: рюкзак растёт на 2 за тик
+ * (добыча 4, апгрейд 2) и упирается в 48.
+ *
+ * **Порог сдачи обязан быть достижим.** Пока харвестер качает контроллер на
+ * месте, его рюкзак стоит на 48, и условие «в рюкзаке не меньше груза рейса»
+ * (50) не выполняется никогда. В E34S53 (26.11.2026) три харвестера стояли
+ * с рюкзаками по 48 из 50 и **никогда не сдавали энергию**: источник
+ * опустошался на 8 энергий в тик, в контроллер уходило 4, а 2 энергии в
+ * тик падали на пол и там сгнивали. Расширения стояли пустыми, билдер не
+ * мог взять энергию (доноры — расширения, спавн исключён) и стоял у клетки
+ * апгрейда, контейнер не строился, апгрейдер не появлялся.
+ *
+ * @param creep Крип-рабочий.
+ * @returns Энергия, которую крип способен накопить в рюкзаке.
+ */
+export function reachableLoad(creep: Creep): number {
+    let capacity = 0;
+    let work = 0;
+
+    for (const part of creep.body) {
+        if (part.type === CARRY) {
+            capacity += CARRY_CAPACITY;
+        } else if (part.type === WORK) {
+            work += 1;
+        }
+    }
+
+    return Math.max(1, capacity - work);
 }
 
 /**
