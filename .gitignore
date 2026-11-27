@@ -38,3 +38,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # bun uses bun.lock, not package-lock.json
 package-lock.json
+
+# отладочные дампы задеплоенного кода
+deployed*.json
