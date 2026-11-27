@@ -10,6 +10,31 @@
 
 Проект использует Bun. Если `bash: bun: command not found...` - используй `export PATH="$HOME/.bun/bin:$PATH"`
 
+## Деплой
+
+Скрипт заливается в Screeps через API. Тело запроса — **JSON**, а не multipart:
+
+```bash
+bun run build
+python3 -c "
+import json
+src = open('dist/main.js', encoding='utf-8').read()
+json.dump({'modules': {'main': src}, 'branch': 'default'}, open('/tmp/payload.json','w'))
+"
+curl -X POST "https://screeps.com/api/user/code" \
+  -H "X-Token: $TOKEN" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  --data-binary @/tmp/payload.json
+```
+
+С multipart (`-F "main=@dist/main.js"`) сервер отвечает
+`TypeError: Cannot read properties of undefined (reading 'length')` — он ждёт
+JSON. Формат взят из `grunt-screeps` (`node_modules/grunt-screeps/tasks/screeps.js`).
+
+Ветка в Screeps — `default`. Ветка в GitHub, из которой код соответствует
+задеплоенному, — `main`: **перед деплоем проверь, что `main` содержит
+изменения**, иначе в игру уедет старый код.
+
 ## Documentation
 
 - API: https://docs.screeps.com/api/
