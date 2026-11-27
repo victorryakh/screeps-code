@@ -71,6 +71,9 @@ Object.assign(global, C, {
     FIND_EXIT_TOP: 1, FIND_EXIT_RIGHT: 2, FIND_EXIT_BOTTOM: 3, FIND_EXIT_LEFT: 4, FIND_EXIT: 5,
     CREEP_LIFE_TIME: 1500,
     MAX_CREEP_SIZE: 50,
+    // Ёмкость источника энергии: движок отдаёт эту величину, и по ней
+    // считается предел дохода комнаты (см. `updateIncomeRate`).
+    SOURCE_ENERGY_CAPACITY: 3000,
     OK: 0, ERR_BUSY: -4, ERR_NOT_ENOUGH_ENERGY: -6, ERR_INVALID_ARGS: -10,
     ERR_NAME_EXISTS: -3, ERR_RCL_NOT_ENOUGH: -14, ERR_NOT_OWNER: -13,
     ERR_INVALID_TARGET: -9, ERR_FULL: -5, ERR_TIRED: -6, ERR_NO_PATH: -4, ERR_NOT_IN_RANGE: -5,

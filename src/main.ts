@@ -15,6 +15,81 @@ import * as log from './log';
 
 console.log("Started script at", new Date().toISOString())
 
+/**
+ * Ключи `Memory`, которые бот считает своими.
+ *
+ * @remarks
+ * Всё, чего в этом списке нет, при очистке отладочного мусора удаляется
+ * только если попадает под {@link DEBUG_MEMORY_KEYS}. Список — страховка:
+ * чистка не должна съесть ничего, чем бот пользуется.
+ */
+const MEMORY_KEYS_OWNED = new Set<string>([
+    'targetRoom',
+    'expansionBlacklist',
+    'expansionPreferredTarget',
+    'debug',
+    'logLevel',
+    '_knownSpawnIds',
+    '_exitsCache',
+    '_notified',
+    '_debugKeysPurged',
+    'metrics',
+    'rooms',
+    'creeps'
+]);
+
+/**
+ * Отладочные ключи `Memory`, оставшиеся от ручной отладки.
+ *
+ * @remarks
+ * Каждый такой ключ движок сериализует в память и разбирает обратно на
+ * каждом тике. В E34S53 к 27.11.2026 в `Memory` накопилось 130 таких ключей
+ * (`_pA`, `__d_h5`, `_tr`, `_inc`, `_map` и прочие) — больше, чем весит вся
+ * остальная память бота. Они никем не читаются (проверено поиском по
+ * `src/`), но каждую тик оплачиваются разбором и хранением.
+ *
+ * Имена отладочных ключей менялись от сессии к сессии, поэтому шаблон
+ * закрывает семейства: `_p*`, `_probe*`, `__p*`, `__probe*`, `__d_*`,
+ * `__rate*`, `_tr*`, `_zz*` и ещё несколько одиночных.
+ */
+const DEBUG_MEMORY_KEYS =
+    /^_{1,2}(p[A-Za-z0-9]*|probe[A-Za-z0-9]*|d_[a-z0-9]+|rate[A-Za-z0-9]*|tr[a-z]*|zz[0-9]*|inc|m2|f|z|map|api[0-9]*|v[0-9]|done|trace|srcTrace|repair)$/;
+
+/**
+ * Одноразовая чистка отладочных ключей из `Memory`.
+ *
+ * @remarks
+ * Чистка выполняется один раз: после неё выставляется
+ * `Memory._debugKeysPurged`, и на следующих тиках функция выходит сразу.
+ * Стоит это один вызов `for…in` по `Memory` за всё время жизни скрипта.
+ */
+function purgeDebugMemoryKeys(): void {
+    if (Memory._debugKeysPurged) {
+        return;
+    }
+
+    Memory._debugKeysPurged = true;
+
+    let removed = 0;
+
+    for (const key in Memory) {
+        if (MEMORY_KEYS_OWNED.has(key)) {
+            continue;
+        }
+
+        if (!DEBUG_MEMORY_KEYS.test(key)) {
+            continue;
+        }
+
+        delete (Memory as unknown as Record<string, unknown>)[key];
+        removed++;
+    }
+
+    if (removed > 0) {
+        log.info('main', `purged ${removed} stale debug key(s) from Memory`);
+    }
+}
+
 
 /**
  * Главная функция тика. Контракт с движком Screeps:
@@ -36,6 +111,11 @@ console.log("Started script at", new Date().toISOString())
 export function loop(): void {
     metrics.tickStart();
     metrics.init();
+
+    // Одноразовая чистка отладочных ключей из `Memory` (см.
+    // `purgeDebugMemoryKeys`): они не читаются никем, но движок сериализует
+    // и разбирает их каждый тик.
+    purgeDebugMemoryKeys();
 
     for (const name in Memory.creeps) {
         const mem = Memory.creeps[name];

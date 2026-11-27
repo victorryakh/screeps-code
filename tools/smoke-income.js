@@ -1560,6 +1560,79 @@ function actions(creep, kind) {
         JSON.stringify(keys));
 }
 
+// --- Scenario 27: потолок дохода считает части WORK харвестера ----------
+// Движок даёт `2 * WORK` энергии за тик на часть WORK, поэтому одна клетка
+// добычи отдаёт вдвое больше, чем при одной части WORK.
+//
+// Потолок дохода стоял на `slotCount * HARVEST_RATE_PER_WORK` — то есть одна
+// часть WORK на клетку. Тело харвестера — [WORK, WORK, CARRY, MOVE], две
+// части WORK, и настоящий потолок вдвое выше.
+//
+// В E34S53 это стоило комнате четверти дохода: измеренный доход был 8
+// энергий в тик (слив источника — 3000 за 300 тиков регенерации), а потолок
+// стоял на 6. Замер упирался в потолок, и бюджет комнаты считался от 6.
+{
+    const sim = makeRoom({
+        creeps: [
+            // Рюкзаки полные: харвестер ничего не добывает и не сливает
+            // источник — сток источника задаётся сценарием вручную.
+            [20, 22, 'harvester', 50, { _harvestTile: { x: 20, y: 22 } }],
+            [20, 24, 'harvester', 50, { _harvestTile: { x: 20, y: 24 } }]
+        ],
+        spawnEnergy: 300
+    });
+
+    // Источник отдаёт 8 энергий в тик: две клетки добычи по две части WORK.
+    for (let i = 0; i < 30; i++) {
+        tick += 1;
+        sim.source.energy = 3000 - i * 8;
+        global.Game = makeGame(sim);
+        global.Memory = { creeps: {} };
+        bot.loop();
+    }
+
+    const rate = sim.room.memory._incomeRate;
+
+    check('the income ceiling counts the WORK parts of the harvester',
+        rate > 7 && rate < 9,
+        `incomeRate=${rate}`);
+}
+
+// --- Scenario 28: харвестер с пустым рюкзаком не съедает бюджет ---------
+// Третий харвестер в E34S53 стоит в зоне апгрейда с пустым рюкзаком:
+// клетка добычи ему недостижима, добывать он не может. Раньше он считался
+// «съедающим» 2 энергии в тик — просто потому, что стоял в зоне апгрейда.
+//
+// Из-за этого `_workBudget` был 0, и комната не могла завести ни билдера,
+// ни ремонтника: контейнер стоял повреждённым, а до стройки дело не
+// доходило никогда.
+{
+    const sim = makeRoom({
+        creeps: [
+            [20, 22, 'harvester', 50, { _harvestTile: { x: 20, y: 22 } }],
+            [20, 24, 'harvester', 50, { _harvestTile: { x: 20, y: 24 } }],
+            // Пустой рюкзак, клетки добычи нет: работать нечем.
+            [19, 21, 'harvester', 0, {}],
+            [20, 21, 'upgrader', 10, {}]
+        ],
+        spawnEnergy: 300
+    });
+
+    for (let i = 0; i < 40; i++) {
+        tick += 1;
+        sim.source.energy = 3000 - i * 8;
+        global.Game = makeGame(sim);
+        global.Memory = { creeps: {} };
+        bot.loop();
+    }
+
+    const budget = sim.room.memory._workBudget;
+
+    check('an idle harvester with an empty backpack does not eat the budget',
+        budget > 2,
+        `workBudget=${budget}`);
+}
+
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 process.exit(failed.length === 0 ? 0 : 1);

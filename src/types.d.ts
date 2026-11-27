@@ -397,6 +397,12 @@ declare global {
          * Не превышает `NOTIFY_MAX_ENTRIES` записей.
          */
         _notified?: Record<string, number>;
+        /**
+         * Флаг: отладочные ключи из `Memory` уже вычищены (см.
+         * `purgeDebugMemoryKeys` в `main.ts`). Ставится один раз, чтобы
+         * чистка не повторялась каждый тик.
+         */
+        _debugKeysPurged?: boolean;
         /** Глобальные счётчики: тики, CPU прошлого тика, bucket, число спавнов/смертей по ролям, общий расход энергии. */
         metrics?: {
             ticks: number;
